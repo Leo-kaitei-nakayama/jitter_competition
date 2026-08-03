@@ -27,20 +27,24 @@ from bridge.data_bridge import ShapeNetNoisyPredictDataset, normalize_unit_spher
 jt.flags.use_cuda = 1
 
 
-def load_model(ckpt_path, use_fusion):
+def load_model(args):
     """Loads a Jittor .pkl checkpoint produced by train_on_starter.py.
     (No torch dependency, no external-data checkpoints -- everything here
-    was trained on the competition's own data only.)"""
-    model = DenoiseNetCD()
-    if use_fusion:
+    was trained on the competition's own data only.)
+
+    The fusion_* options must match the ones the checkpoint was trained with,
+    otherwise the fusion head's weights will not line up."""
+    model = DenoiseNetCD(fusion_k=args.fusion_k, fusion_gate=args.fusion_gate,
+                         fusion_include_self=args.fusion_include_self)
+    if args.use_fusion:
         model.feature_nets.use_fusion = True
-    model.load(ckpt_path)
+    model.load(args.ckpt)
     model.eval()
     return model
 
 
 def main(args):
-    model = load_model(args.ckpt, args.use_fusion)
+    model = load_model(args)
     model.set_predict(True) if hasattr(model, 'set_predict') else None
     model.eval()
 
@@ -52,6 +56,7 @@ def main(args):
         num_workers=args.num_workers,
     )
 
+    taus = []
     for batch in tqdm(ds, desc='Predicting'):
         # batch_size=1; unwrap
         pc_noisy = batch['pc_noisy']
@@ -70,14 +75,20 @@ def main(args):
         with jt.no_grad():
             pcl = jt.array(pc_norm)
             if args.use_diffusion:
-                pcl = model.patch_based_denoise_diffusion(
+                pcl, tau = model.patch_based_denoise_diffusion(
                     pcl_noisy=pcl,
                     patch_size=args.patch_size,
                     seed_k=args.seed_k,
                     seed_k_alpha=args.seed_k_alpha,
                     L=args.diffusion_L,
                     t_start=args.diffusion_t_start,
+                    adaptive=not args.fixed_schedule,
+                    sigma_scale=args.sigma_scale,
+                    sigma_estimator=args.sigma_estimator,
+                    t_norm=args.t_norm,
+                    return_tau=True,
                 )
+                taus.append((rel, tau))
             else:
                 for _ in range(args.niters):
                     pcl = model.patch_based_denoise(
@@ -95,6 +106,14 @@ def main(args):
         os.makedirs(out_dir, exist_ok=True)
         np.save(os.path.join(out_dir, args.out_name), denoised.astype(np.float32))
 
+    if taus:
+        # tau maps back to noise level as sigma ~= 3.16e-5 * tau^2, so this is a
+        # quick sanity read on whether the adaptive schedule is tracking the data.
+        tv = np.array([t for _, t in taus], dtype=np.float64)
+        print(f'[adaptive schedule] tau over {len(tv)} clouds: '
+              f'min={tv.min():.0f} mean={tv.mean():.0f} max={tv.max():.0f} '
+              f'(sigma ~ {3.16e-5 * tv.min() ** 2:.4f} .. {3.16e-5 * tv.max() ** 2:.4f})')
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -111,7 +130,31 @@ if __name__ == '__main__':
     parser.add_argument('--use_diffusion', action='store_true',
                         help='use L-step diffusion sampling (Alg. 2) instead of niters loop')
     parser.add_argument('--diffusion_L', type=int, default=5)
-    parser.add_argument('--diffusion_t_start', type=int, default=632)
+    parser.add_argument('--diffusion_t_start', type=int, default=632,
+                        help='starting timestep when --fixed_schedule is set; also the '
+                             'probe timestep for the adaptive estimate when --t_norm=T')
+    parser.add_argument('--fixed_schedule', action='store_true',
+                        help='disable the adaptive schedule (Eq. 15/16) and start every '
+                             'cloud at --diffusion_t_start. This is the paper\'s '
+                             '"FixedSched" baseline; adaptive is on by default.')
+    parser.add_argument('--sigma_scale', type=float, default=1.0,
+                        help='multiplier on the estimated noise sigma before picking tau. '
+                             'Eq. 15 is a biased estimator, so sweep this on a local eval '
+                             'set (make_eval_set.py + evaluate.py) -- it is the cheapest '
+                             'single knob for score.')
+    parser.add_argument('--sigma_estimator', type=str, default='rms', choices=['var', 'rms'],
+                        help="'var' is Eq. 15 literally, but Var(||s||) underestimates sigma "
+                             'by ~1.66x for isotropic noise, so it systematically '
+                             "under-denoises. 'rms' = sqrt(mean(||s||^2)) recovers the true "
+                             'timestep exactly in that case and is the default here.')
+    parser.add_argument('--t_norm', type=str, default='T', choices=['T', 'tau'],
+                        help='must match the value train_on_starter.py was run with')
+    parser.add_argument('--fusion_k', type=int, default=16,
+                        help='must match training (paper uses 32)')
+    parser.add_argument('--fusion_gate', type=str, default='pos', choices=['pos', 'posfeat'],
+                        help='must match training')
+    parser.add_argument('--fusion_include_self', action='store_true',
+                        help='must match training')
 
     parser.add_argument('--patch_size', type=int, default=1000)
     parser.add_argument('--niters', type=int, default=1)

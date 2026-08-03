@@ -44,6 +44,32 @@ def sample_mesh_surface(path, num_samples):
     return np.asarray(pts, dtype=np.float32)
 
 
+def sample_noise(shape, noise_std, dist='laplace', rng=None):
+    """
+    Draw additive noise whose STANDARD DEVIATION is `noise_std`.
+
+    The competition specifies its test noise by standard deviation
+    (0.005 ~ 0.020 after unit-sphere normalization), and the diffusion schedule
+    is indexed by sigma_bar, also a standard deviation. numpy's Laplace is
+    parameterized by its *scale* b, and Laplace(0, b) has std b*sqrt(2) -- so
+    passing noise_std straight in as the scale produced noise 1.41x stronger
+    than both the label attached to it and the competition's own range.
+    Dividing by sqrt(2) makes `noise_std` mean what it says.
+
+    Args:
+        shape: output shape
+        noise_std: target standard deviation
+        dist: 'laplace' (heavier tails, what this pipeline has always used) or
+              'gaussian' (what the diffusion schedule assumes)
+    """
+    rng = np.random if rng is None else rng
+    if dist == 'gaussian':
+        return rng.normal(0.0, noise_std, size=shape).astype(np.float32)
+    if dist == 'laplace':
+        return rng.laplace(0.0, noise_std / math.sqrt(2.0), size=shape).astype(np.float32)
+    raise ValueError(f'unknown noise distribution: {dist!r}')
+
+
 def _random_euler_rotation_matrix(x_range, y_range, z_range):
     """Same convention as the starter's AugmentLinear: independent random
     Euler angles per axis, combined as Rz @ Ry @ Rx (radians)."""
@@ -83,7 +109,8 @@ class ShapeNetPatchTrainDataset(Dataset):
 
     def __init__(self, root, datalist, num_samples=32768, patch_size=1000,
                  noise_min=0.005, noise_max=0.02, batch_size=8, shuffle=True,
-                 num_workers=4, mesh_name='models/model_normalized.obj'):
+                 num_workers=4, mesh_name='models/model_normalized.obj',
+                 noise_dist='laplace'):
         super().__init__()
         self.root = root
         self.entries = _read_datalist(datalist)
@@ -91,6 +118,7 @@ class ShapeNetPatchTrainDataset(Dataset):
         self.patch_size = patch_size
         self.noise_min = noise_min
         self.noise_max = noise_max
+        self.noise_dist = noise_dist
         self.mesh_name = mesh_name
         self.set_attrs(total_len=len(self.entries), batch_size=batch_size,
                        shuffle=shuffle, num_workers=num_workers)
@@ -105,7 +133,7 @@ class ShapeNetPatchTrainDataset(Dataset):
         pc = random_linear_augment(pc)  # rotation + scale augmentation
 
         noise_std = np.random.uniform(self.noise_min, self.noise_max)
-        noise = np.random.laplace(0, noise_std, size=pc.shape).astype(np.float32)
+        noise = sample_noise(pc.shape, noise_std, self.noise_dist)
         pc_noisy = pc + noise
 
         # one patch around a random seed

@@ -11,7 +11,8 @@ class FeatureExtraction(nn.Module):
     def __init__(self, d_in=0, d_out=32,
                  n_cls=3, nsample=16, stride_list=[4, 3, 2, 1],
                  architecture=None,
-                 classify_ckpt=None, classify_frame_knn=32):
+                 classify_ckpt=None, classify_frame_knn=32,
+                 fusion_k=16, fusion_gate='pos', fusion_include_self=False):
         super().__init__()
         architecture = ['startblock',
                         'downsample',
@@ -61,7 +62,9 @@ class FeatureExtraction(nn.Module):
         self.linear0_1 = nn.Linear(d_out, 128, bias=False)
         self.linear0_2 = nn.Linear(128, 64)
         self.linear0_3 = nn.Linear(64, n_cls)
-        self.fusion_head = FusionHead(feat_dim=d_out)
+        self.fusion_head = FusionHead(feat_dim=d_out, k=fusion_k,
+                                      gate_mode=fusion_gate,
+                                      include_self=fusion_include_self)
         self.use_fusion = False
 
         # Competition rule: no data/weights from outside the provided dataset.
@@ -82,7 +85,13 @@ class FeatureExtraction(nn.Module):
         gamma = 0.396
 
         def assign_n_layer_based_on_rho(rho_list):
-            return [math.ceil(L - (L - 1) * math.log(gamma * float(rho) + 1)) for rho in rho_list]
+            # ScaleNet ends in a tanh, so rho lands in (-1, 1) and the raw
+            # formula yields n in {3,...,6}. Anything outside {2,3,4} appears in
+            # none of the layer_2/layer_3/layer_4 index lists below, and such a
+            # sample is silently dropped by the encoder subsetting at block 4 and
+            # never written back by the decoder. Clamp into the supported range.
+            return [min(L, max(2, math.ceil(L - (L - 1) * math.log(gamma * float(rho) + 1))))
+                    for rho in rho_list]
 
         batch_size = p.shape[0]
         num_points = p.shape[1]
@@ -183,19 +192,23 @@ class FeatureExtraction(nn.Module):
                     x = x_dense.reshape(-1, x.shape[-1])
                     
         
+        feat_t = x.reshape(batch_size, num_points, -1)   # E(x^t)
+
         if self.use_fusion:
-            feat_t = x.reshape(batch_size, num_points, -1)   # E(x^t)
             pos = p.reshape(batch_size, num_points, -1)      # current positions
             if t_frac is None:
                 t_frac = jt.zeros((batch_size, num_points, 1))
             feat_T_used = feat_t if feat_T is None else feat_T
             x_out = self.fusion_head(pos, t_frac, feat_t, feat_T_used)
-            if return_feat:
-                return x_out, feat_t
         else:
             x = nn.relu(self.linear0_1(x))
             x = nn.relu(self.linear0_2(x))
             x_out = jt.tanh(self.linear0_3(x))
             x_out = x_out.reshape(batch_size, num_points, -1)
 
+        # Callers always unpack two values when return_feat=True. The old code
+        # only did so inside the use_fusion branch, so every return_feat=True
+        # call with the plain MLP head raised a "cannot unpack" TypeError.
+        if return_feat:
+            return x_out, feat_t
         return x_out

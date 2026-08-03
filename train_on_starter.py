@@ -27,7 +27,10 @@ def main(args):
     if is_master:
         os.makedirs(args.save_dir, exist_ok=True)
 
-    model = DenoiseNetCD(classify_ckpt=args.classify_ckpt, classify_frame_knn=args.classify_frame_knn)
+    model = DenoiseNetCD(classify_ckpt=args.classify_ckpt,
+                         classify_frame_knn=args.classify_frame_knn,
+                         fusion_k=args.fusion_k, fusion_gate=args.fusion_gate,
+                         fusion_include_self=args.fusion_include_self)
     if args.use_fusion:
         model.feature_nets.use_fusion = True
     
@@ -48,6 +51,7 @@ def main(args):
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        noise_dist=args.noise_dist,
     )
 
     for epoch in range(args.epochs):
@@ -61,6 +65,9 @@ def main(args):
                 pcl_clean=batch['pcl_clean'],
                 pcl_seeds=batch['seed_pnts'],
                 pcl_std=batch['pcl_std'],
+                mask_size=args.mask_size,
+                t_min=args.t_min,
+                t_norm=args.t_norm,
             )
             optimizer.step(loss)  # Jittor auto all-reduces gradients across GPUs here
             losses.append(loss.item())
@@ -89,12 +96,40 @@ if __name__ == '__main__':
     parser.add_argument('--patch_size', type=int, default=1000)
     parser.add_argument('--noise_min', type=float, default=0.005)
     parser.add_argument('--noise_max', type=float, default=0.02)
+    parser.add_argument('--noise_dist', type=str, default='laplace',
+                        choices=['laplace', 'gaussian'],
+                        help='additive noise shape. Either way noise_min/max are '
+                             'standard deviations, matching the competition spec.')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--use_fusion', action='store_true',
                         help='use the new FusionHead (Feature/Gradient Fusion) output head')
+    # --- diffusion training strategy (paper Algorithm 1) ---
+    parser.add_argument('--mask_size', type=int, default=256,
+                        help='K_p: how many of the patch\'s innermost points carry the '
+                             'loss. Stage 2 advances the rest with the GT score. 0 disables.')
+    parser.add_argument('--t_min', type=int, default=30,
+                        help='floor on sampled timesteps; the Eq. 9 weight diverges as t->0. '
+                             'Must stay below the smallest t inference visits (~32 for the '
+                             'quietest clouds at L=5).')
+    parser.add_argument('--t_norm', type=str, default='T', choices=['T', 'tau'],
+                        help="what the relative timestep is divided by. 'T' makes t_frac an "
+                             'absolute noise-level signal and is what makes the adaptive '
+                             "schedule bite at inference; 'tau' is the paper's convention "
+                             'but makes t_frac identical for every cloud, which cancels the '
+                             'adaptive estimate. Keep T unless you know why you want tau. '
+                             'predict_on_starter.py must be given the same value.')
+    parser.add_argument('--fusion_k', type=int, default=16,
+                        help='neighbours per point in the gradient prediction/fusion '
+                             'modules (paper uses 32)')
+    parser.add_argument('--fusion_gate', type=str, default='pos', choices=['pos', 'posfeat'],
+                        help="how FeatureFusion builds its gates. 'posfeat' conditions "
+                             'them on E(x^t)/E(x^T) as the paper describes; '
+                             "'pos' is the older position-only variant.")
+    parser.add_argument('--fusion_include_self', action='store_true',
+                        help='let each point be its own gradient-prediction neighbour')
     parser.add_argument('--save_interval', type=int, default=5)
     parser.add_argument('--classify_ckpt', type=str, default=None,
                         help='Jittor .pkl from train_classifier_on_starter.py '

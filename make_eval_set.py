@@ -26,6 +26,7 @@ Output layout (matches what evaluate.py expects):
 """
 
 import os
+import math
 import argparse
 import shutil
 import numpy as np
@@ -60,6 +61,9 @@ def main():
     parser.add_argument('--num_points', type=int, default=50000)
     parser.add_argument('--noise_min', type=float, default=0.005)
     parser.add_argument('--noise_max', type=float, default=0.02)
+    parser.add_argument('--noise_dist', type=str, default='laplace',
+                         choices=['laplace', 'gaussian'],
+                         help='must match what train_on_starter.py was given')
     parser.add_argument('--out_gt', type=str, default='./eval_gt')
     parser.add_argument('--out_noisy', type=str, default='./eval_noisy')
     parser.add_argument('--out_mesh', type=str, default='./eval_mesh_normalized')
@@ -100,9 +104,15 @@ def main():
         pc = sample_mesh_surface(mesh_path, args.num_points)
         pc_clean, center, scale = normalize_unit_sphere(pc)
 
-        # 2. Add Laplace noise, same distribution as training/test generation
+        # 2. Add noise with the same distribution as training/test generation.
+        #    noise_std is a STANDARD DEVIATION, matching the competition's spec;
+        #    Laplace(0, b) has std b*sqrt(2), so the scale is derived from it.
         noise_std = rng.uniform(args.noise_min, args.noise_max)
-        noise = rng.laplace(0, noise_std, size=pc_clean.shape).astype(np.float32)
+        if args.noise_dist == 'gaussian':
+            noise = rng.normal(0, noise_std, size=pc_clean.shape).astype(np.float32)
+        else:
+            noise = rng.laplace(0, noise_std / math.sqrt(2.0),
+                                 size=pc_clean.shape).astype(np.float32)
         pc_noisy = (pc_clean + noise).astype(np.float32)
 
         # 3. Save clean.npy
