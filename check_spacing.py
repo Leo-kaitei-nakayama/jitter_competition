@@ -72,6 +72,12 @@ def main():
         g_mean, g_cv, _ = spacing_stats(g_n)
         p_mean, p_cv, p_nn = spacing_stats(p_n)
 
+        # Control: the GT is trimesh.sample_surface, a uniform RANDOM sampling,
+        # not blue noise. For a random point process roughly 18% of points
+        # already have a neighbour closer than half the mean spacing, so the
+        # prediction's figure is only meaningful against the GT's own.
+        _, _, g_nn = spacing_stats(g_n)
+        gt_close_frac = float((g_nn < 0.5 * g_mean).mean())
         close_frac = float((p_nn < 0.5 * g_mean).mean())
 
         # CD reverse term in distance units: how far is each GT point from the
@@ -80,7 +86,8 @@ def main():
 
         row = dict(key=k, gt_mean=g_mean, gt_cv=g_cv,
                    pred_mean=p_mean, pred_cv=p_cv,
-                   close_frac=close_frac, cover_p95=float(np.percentile(cover, 95)))
+                   gt_close_frac=gt_close_frac, close_frac=close_frac,
+                   cover_p95=float(np.percentile(cover, 95)))
 
         if k in noisy:
             n = np.load(noisy[k]).astype(np.float64)
@@ -95,7 +102,8 @@ def main():
     print('\n' + '=' * 78)
     print('Nearest-neighbour spacing: prediction vs ground truth')
     print('=' * 78)
-    cols = ['gt_mean', 'pred_mean', 'gt_cv', 'pred_cv', 'close_frac', 'cover_p95']
+    cols = ['gt_mean', 'pred_mean', 'gt_cv', 'pred_cv',
+            'gt_close_frac', 'close_frac', 'cover_p95']
     if 'noisy_cv' in df:
         cols.insert(4, 'noisy_cv')
     print(df[cols].agg(['mean', 'std', 'min', 'max']).to_string())
@@ -109,10 +117,11 @@ def main():
     print(f'  spacing uniformity (cv):   GT {gt_cv:.3f}   pred {pred_cv:.3f}   '
           f'({pred_cv / gt_cv:.2f}x)')
     print(f'  mean spacing ratio pred/GT: {ratio:.3f}')
-    print(f'  points with a neighbour closer than half GT spacing: '
-          f'{df["close_frac"].mean():.1%}')
+    print(f'  neighbour closer than half GT spacing:  GT {df["gt_close_frac"].mean():.1%}'
+          f'   pred {df["close_frac"].mean():.1%}')
 
-    if pred_cv > 1.25 * gt_cv or df['close_frac'].mean() > 0.10:
+    excess_close = df['close_frac'].mean() - df['gt_close_frac'].mean()
+    if pred_cv > 1.25 * gt_cv or excess_close > 0.10:
         print('\n  -> CLUMPED. The prediction is measurably less uniform than the')
         print('     ground truth. A tangential repulsion filter should reduce CD')
         print('     without disturbing P2S.')
