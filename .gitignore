@@ -1,0 +1,21 @@
+# datasets & eval data
+dataset_test_noisy/
+dataset_train/
+datasets/
+eval_gt/
+eval_mesh_normalized/
+eval_noisy/
+eval_predict/
+
+# results / experiment outputs
+experiments/
+results/
+pretrained/
+
+# cache
+**/__pycache__/
+*.pyc
+
+# misc
+.DS_Store
+*.log
