@@ -16,7 +16,73 @@ Offset format recap (as used throughout blocks.py):
 """
 
 import jittor as jt
+import numpy as np
 import math
+
+
+def _fps_batched(pts, n_sample):
+    """
+    Exact farthest-point sampling, vectorized over the batch.
+
+    Produces byte-identical output to the per-segment Python loop it replaces
+    (deterministic start at index 0, ties broken by argmax), with one change:
+    the running `farthest` index stays on the device as a Var instead of being
+    pulled to the host with .item() on every step.
+
+    That single change is what matters for speed. The old loop issued one
+    blocking GPU sync per sampled point, and Downsampling calls FPS once per
+    encoder block per batch element -- roughly 16k syncs per forward pass at the
+    default 1000-point patches and stride_list=[4,3,2,1] with batch 8. Sync
+    latency, not arithmetic, dominated the step time, which is also why adding
+    GPUs did not speed training up.
+
+    Args:
+        pts: (B, N, 3)
+        n_sample: number of points to select per batch element
+    Returns:
+        (B, n_sample) int32 Var of indices into the N axis
+    """
+    B, N, _ = pts.shape
+    if n_sample <= 0:
+        return jt.zeros((B, 0), dtype='int32')
+
+    batch_ar = jt.arange(B)                       # (B,)
+    dist = jt.full((B, N), 1e10)
+    farthest = jt.zeros((B,), dtype='int32')      # deterministic start point
+    picked = []
+
+    for _ in range(n_sample):
+        picked.append(farthest)
+        centroid = pts[batch_ar, farthest].unsqueeze(1)   # (B, 1, 3), device-side gather
+        d = ((pts - centroid) ** 2).sum(dim=-1)           # (B, N)
+        dist = jt.minimum(dist, d)
+        # cast keeps every entry of `picked` the same dtype for the stack below,
+        # regardless of what width argmax returns
+        farthest = jt.argmax(dist, dim=1)[0].int32()      # (B,), never leaves the device
+
+    return jt.stack(picked, dim=1)
+
+
+def _fps_reference(pts, n_sample):
+    """
+    The original per-point loop, kept only so bench_fps.py can prove that
+    _fps_batched returns the same indices. Not used in training or inference.
+
+    pts: (N, 3) -> (n_sample,) int32 Var of local indices.
+    """
+    n_pts = pts.shape[0]
+    selected = jt.zeros((n_sample,), dtype='int32')
+    dist = jt.full((n_pts,), 1e10)
+    farthest = 0
+
+    for i in range(n_sample):
+        selected[i] = farthest
+        centroid = pts[farthest:farthest + 1, :]
+        d = ((pts - centroid) ** 2).sum(dim=-1)
+        dist = jt.minimum(dist, d)
+        farthest = int(jt.argmax(dist, dim=0)[0].item())
+
+    return selected
 
 
 def _offsets_to_bounds(o):
@@ -57,27 +123,29 @@ def furthestsampling(p, o, n_o):
     in_bounds = _offsets_to_bounds(o)
     out_bounds = _offsets_to_bounds(n_o)
 
+    sizes_in = [e - s for s, e in in_bounds]
+    sizes_out = [e - s for s, e in out_bounds]
+
+    # Fast path: all segments the same size, which is always the case for the
+    # offsets this codebase builds (denoiseCD makes o uniform, and Downsampling
+    # derives n_o from a single `count`). Run the whole batch as one (B, N, 3).
+    if (sizes_in and sizes_out[0] > 0
+            and len(set(sizes_in)) == 1 and len(set(sizes_out)) == 1):
+        B, N = len(sizes_in), sizes_in[0]
+        pts = p[in_bounds[0][0]:in_bounds[-1][1]].reshape(B, N, 3)
+        idx = _fps_batched(pts, sizes_out[0])                 # (B, M) segment-local
+        starts = jt.array(
+            np.array([s for s, _ in in_bounds], dtype=np.int32)).reshape(B, 1)
+        return (idx + starts).reshape(-1)
+
+    # General path: segments of differing length, one batched call each.
     all_idx = []
     for (start, end), (out_start, out_end) in zip(in_bounds, out_bounds):
-        n_pts = end - start
         n_sample = out_end - out_start
-        pts = p[start:end]  # (n_pts, 3)
-
         if n_sample <= 0:
             continue
-
-        selected = jt.zeros((n_sample,), dtype='int32')
-        dist = jt.full((n_pts,), 1e10)
-        farthest = 0  # deterministic start point, matches random_start=False behavior
-
-        for i in range(n_sample):
-            selected[i] = farthest
-            centroid = pts[farthest:farthest + 1, :]  # (1,3)
-            d = ((pts - centroid) ** 2).sum(dim=-1)    # (n_pts,)
-            dist = jt.minimum(dist, d)
-            farthest = int(jt.argmax(dist, dim=0)[0].item())
-
-        all_idx.append(selected + start)
+        idx = _fps_batched(p[start:end].unsqueeze(0), n_sample)[0]
+        all_idx.append(idx + start)
 
     return jt.concat(all_idx, dim=0) if all_idx else jt.zeros((0,), dtype='int32')
 
@@ -219,24 +287,11 @@ def farthest_point_sampling(pcls, num_pnts):
         indices: list of length B, each a (num_pnts,) LongVar of local indices
     """
     B, N, _ = pcls.shape
-    sampled = []
-    indices = []
 
-    for b in range(B):
-        pts = pcls[b]  # (N,3)
-        selected = jt.zeros((num_pnts,), dtype='int32')
-        dist = jt.full((N,), 1e10)
-        farthest = 0
+    idx = _fps_batched(pcls, num_pnts)                          # (B, num_pnts)
+    batch_ar = jt.arange(B).reshape(B, 1).broadcast((B, num_pnts))
+    sampled = pcls[batch_ar, idx]                               # (B, num_pnts, 3)
 
-        for i in range(num_pnts):
-            selected[i] = farthest
-            centroid = pts[farthest:farthest + 1, :]
-            d = ((pts - centroid) ** 2).sum(dim=-1)
-            dist = jt.minimum(dist, d)
-            farthest = int(jt.argmax(dist, dim=0)[0].item())
-
-        indices.append(selected)
-        sampled.append(pts[selected].unsqueeze(0))
-
-    sampled = jt.concat(sampled, dim=0)
+    # keep the list-of-Vars contract: classify.patch_based_shang does indices[0]
+    indices = [idx[b] for b in range(B)]
     return sampled, indices
