@@ -20,13 +20,14 @@ class DenoiseNetCD(nn.Module):
     """
 
     def __init__(self, args=None, classify_ckpt=None, classify_frame_knn=32,
-                 fusion_k=16, fusion_gate='pos', fusion_include_self=False):
+                 fusion_k=16, fusion_gate='pos', fusion_include_self=False,
+                 static_depth=False):
         super().__init__()
         self.args = args
         self.feature_nets = FeatureExtraction(
             classify_ckpt=classify_ckpt, classify_frame_knn=classify_frame_knn,
             fusion_k=fusion_k, fusion_gate=fusion_gate,
-            fusion_include_self=fusion_include_self)
+            fusion_include_self=fusion_include_self, static_depth=static_depth)
         from .fusion import DiffusionSchedule
         self.schedule = DiffusionSchedule()
 

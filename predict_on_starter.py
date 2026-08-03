@@ -35,7 +35,8 @@ def load_model(args):
     The fusion_* options must match the ones the checkpoint was trained with,
     otherwise the fusion head's weights will not line up."""
     model = DenoiseNetCD(fusion_k=args.fusion_k, fusion_gate=args.fusion_gate,
-                         fusion_include_self=args.fusion_include_self)
+                         fusion_include_self=args.fusion_include_self,
+                         static_depth=args.static_depth)
     if args.use_fusion:
         model.feature_nets.use_fusion = True
     model.load(args.ckpt)
@@ -154,6 +155,8 @@ if __name__ == '__main__':
     parser.add_argument('--fusion_gate', type=str, default='pos', choices=['pos', 'posfeat'],
                         help='must match training')
     parser.add_argument('--fusion_include_self', action='store_true',
+                        help='must match training')
+    parser.add_argument('--static_depth', action='store_true',
                         help='must match training')
 
     parser.add_argument('--patch_size', type=int, default=1000)

@@ -30,7 +30,8 @@ def main(args):
     model = DenoiseNetCD(classify_ckpt=args.classify_ckpt,
                          classify_frame_knn=args.classify_frame_knn,
                          fusion_k=args.fusion_k, fusion_gate=args.fusion_gate,
-                         fusion_include_self=args.fusion_include_self)
+                         fusion_include_self=args.fusion_include_self,
+                         static_depth=args.static_depth)
     if args.use_fusion:
         model.feature_nets.use_fusion = True
     
@@ -130,6 +131,13 @@ if __name__ == '__main__':
                              "'pos' is the older position-only variant.")
     parser.add_argument('--fusion_include_self', action='store_true',
                         help='let each point be its own gradient-prediction neighbour')
+    parser.add_argument('--static_depth', action='store_true',
+                        help='run every sample through all 4 encoder/decoder layers '
+                             'instead of letting the classifier pick a per-sample depth. '
+                             'REQUIRED for multi-GPU: Jittor BatchNorm is SyncBN under '
+                             'MPI, so a data-dependent block count makes ranks issue '
+                             'different numbers of collectives and NCCL deadlocks. '
+                             'predict_on_starter.py must be given the same value.')
     parser.add_argument('--save_interval', type=int, default=5)
     parser.add_argument('--classify_ckpt', type=str, default=None,
                         help='Jittor .pkl from train_classifier_on_starter.py '

@@ -12,8 +12,10 @@ class FeatureExtraction(nn.Module):
                  n_cls=3, nsample=16, stride_list=[4, 3, 2, 1],
                  architecture=None,
                  classify_ckpt=None, classify_frame_knn=32,
-                 fusion_k=16, fusion_gate='pos', fusion_include_self=False):
+                 fusion_k=16, fusion_gate='pos', fusion_include_self=False,
+                 static_depth=False):
         super().__init__()
+        self.static_depth = static_depth
         architecture = ['startblock',
                         'downsample',
                         'downsample',
@@ -100,8 +102,27 @@ class FeatureExtraction(nn.Module):
         o_from_encoder = []
         x_out = []
 
-        rho_list, _ = self.classify.feature_nets[0](p.reshape(batch_size, num_points, -1), None)
-        n_layers = assign_n_layer_based_on_rho(rho_list)
+        if self.static_depth:
+            # Every sample takes all L layers, which makes the graph identical
+            # for any input. Two reasons that matters:
+            #
+            #  1. MULTI-GPU. Jittor's BatchNorm becomes SyncBN under MPI, so each
+            #     BN issues an mpi_all_reduce *inside* the forward pass. With
+            #     data-dependent depth, different ranks execute different numbers
+            #     of blocks and therefore different numbers of collectives. NCCL
+            #     requires collectives to match across ranks, so the job
+            #     deadlocks -- 100% GPU utilization at idle power draw.
+            #  2. The routing below only handles n in {2,3,4}; the classifier
+            #     driving it is often untrained, so its rho -- and the depth it
+            #     selects -- is close to arbitrary anyway.
+            #
+            # Skipping the classifier forward is also a real speedup: ScaleNet
+            # runs four DynamicEdgeConv layers, each rebuilding a k=32 KNN graph.
+            n_layers = [L] * batch_size
+        else:
+            rho_list, _ = self.classify.feature_nets[0](
+                p.reshape(batch_size, num_points, -1), None)
+            n_layers = assign_n_layer_based_on_rho(rho_list)
         layer_2 = [i for i, n in enumerate(n_layers) if n == 2]
         layer_3 = [i for i, n in enumerate(n_layers) if n == 3]
         layer_4 = [i for i, n in enumerate(n_layers) if n == 4]
