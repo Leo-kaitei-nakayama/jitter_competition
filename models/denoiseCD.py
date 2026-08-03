@@ -85,7 +85,7 @@ class DenoiseNetCD(nn.Module):
         return score
 
     def get_supervised_loss(self, pcl_noisy, pcl_clean, pcl_seeds, pcl_std, lam=0.99,
-                             mask_size=256, t_min=30, t_norm='T'):
+                             mask_size=256, t_min=30, t_norm='T', exact_score=False):
         """
         Two-stage sampling loss (paper Algorithm 1, Eq. 9).
             Stage 1: predict score at x^t, loss vs GT score S(x^t)
@@ -111,8 +111,28 @@ class DenoiseNetCD(nn.Module):
                          makes the value mean "progress through this trajectory"
                          and always starts at 1.
                 This must match whatever predict_on_starter.py is given.
+            exact_score: use the exact per-point displacement as the training
+                target instead of Eq. 14's nearest-neighbour approximation.
+                Eq. 14 defines S(x) = NN(x, x_clean) - x because in the paper's
+                setting the clean cloud is an independent sampling of the surface
+                with no correspondence to the noisy one. This competition's data
+                is different: bridge/data_bridge.py builds both patches from the
+                SAME point indices, so row i of pcl_clean is row i of pcl_noisy
+                before displacement, and the true score is simply
+                pcl_clean - pcl. The nearest-neighbour search approximates a
+                quantity that is already known exactly, and it returns the wrong
+                point whenever a displaced sample lands closer to a neighbour
+                than to its own origin -- which pulls points sideways and
+                clusters them.
+                Training-only; inference is unaffected, so predict_on_starter.py
+                needs no matching flag.
         """
         B, N_noisy, N_clean = pcl_noisy.shape[0], pcl_noisy.shape[1], pcl_clean.shape[1]
+        if exact_score and N_noisy != N_clean:
+            raise ValueError(
+                f'exact_score needs point-corresponded patches, but got '
+                f'{N_noisy} noisy vs {N_clean} clean points. Only use it with a '
+                f'dataset that pairs the two row-by-row.')
 
         # center on seeds (same as before)
         pcl_noisy = pcl_noisy - pcl_seeds.repeat(1, N_noisy, 1)
@@ -183,11 +203,15 @@ class DenoiseNetCD(nn.Module):
                 err = err * mask2
             return err.sum() / denom
 
+        def _gt_score(pcl):
+            # exact: row-corresponded displacement. approximate: Eq. 14's NN search.
+            return (pcl_clean - pcl) if exact_score else self.compute_gt_score(pcl, pcl_clean)
+
         # ================= Stage 1 =================
         x_t = pcl_noisy
         score1, feat_T = self.feature_nets(
             x_t, feat_empty, offset, feat_T=None, t_frac=t_frac, return_feat=True)
-        gt_score1 = self.compute_gt_score(x_t, pcl_clean)
+        gt_score1 = _gt_score(x_t)
         loss1 = _masked_loss(w1, score1, gt_score1)
 
         # ================= Stage 2 =================
@@ -200,7 +224,7 @@ class DenoiseNetCD(nn.Module):
 
         score2 = self.feature_nets(
             x_td, feat_empty, offset, feat_T=feat_T, t_frac=t_frac_td, return_feat=False)
-        gt_score2 = self.compute_gt_score(x_td, pcl_clean)
+        gt_score2 = _gt_score(x_td)
         loss2 = _masked_loss(w2, score2, gt_score2)
 
         return loss1 + loss2

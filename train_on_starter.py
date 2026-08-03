@@ -69,6 +69,7 @@ def main(args):
                 mask_size=args.mask_size,
                 t_min=args.t_min,
                 t_norm=args.t_norm,
+                exact_score=args.exact_score,
             )
             optimizer.step(loss)  # Jittor auto all-reduces gradients across GPUs here
             losses.append(loss.item())
@@ -131,6 +132,12 @@ if __name__ == '__main__':
                              "'pos' is the older position-only variant.")
     parser.add_argument('--fusion_include_self', action='store_true',
                         help='let each point be its own gradient-prediction neighbour')
+    parser.add_argument('--exact_score', action='store_true',
+                        help='train against the exact per-point displacement '
+                             '(pcl_clean - pcl) instead of Eq. 14\'s nearest-neighbour '
+                             'approximation. Valid because data_bridge pairs the noisy '
+                             'and clean patches row-by-row. Training-only -- '
+                             'predict_on_starter.py needs no matching flag.')
     parser.add_argument('--static_depth', action='store_true',
                         help='run every sample through all 4 encoder/decoder layers '
                              'instead of letting the classifier pick a per-sample depth. '
