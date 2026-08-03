@@ -140,11 +140,15 @@ if __name__ == '__main__':
                         help='disable the adaptive schedule (Eq. 15/16) and start every '
                              'cloud at --diffusion_t_start. This is the paper\'s '
                              '"FixedSched" baseline; adaptive is on by default.')
-    parser.add_argument('--sigma_scale', type=float, default=1.0,
+    parser.add_argument('--sigma_scale', type=float, default=1.5,
                         help='multiplier on the estimated noise sigma before picking tau. '
-                             'Eq. 15 is a biased estimator, so sweep this on a local eval '
-                             'set (make_eval_set.py + evaluate.py) -- it is the cheapest '
-                             'single knob for score.')
+                             'The Eq. 15 estimator reads low, so the model is told the '
+                             'cloud is cleaner than it is and under-denoises. 1.5 was '
+                             'measured as the optimum on a 30-sample local eval set '
+                             '(76.94 vs 74.30 at 1.0; CD and P2S both peak there, so it '
+                             'is a calibration fix, not a trade-off). Re-sweep it against '
+                             'your own eval set after retraining -- it is model-specific '
+                             'and the cheapest single knob for score.')
     parser.add_argument('--sigma_estimator', type=str, default='rms', choices=['var', 'rms'],
                         help="'var' is Eq. 15 literally, but Var(||s||) underestimates sigma "
                              'by ~1.66x for isotropic noise, so it systematically '
