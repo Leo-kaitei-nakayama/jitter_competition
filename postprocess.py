@@ -49,6 +49,73 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 
+def jet_project(pc, k=16, strength=1.0, degree=2, ridge=1e-8):
+    """
+    Move each point onto a locally fitted surface patch (MLS / jet fitting).
+
+    Denoised points scatter randomly around the true surface. Fitting a small
+    polynomial patch through a point's neighbourhood averages that scatter out,
+    and snapping the point onto the patch removes most of it -- which lowers
+    P2S directly, and lowers CD too, since a point sitting d away from the
+    surface is at least d from every ground-truth point.
+
+    Motion is along the local normal only: the point keeps its tangential
+    position, so the spacing that tangential_repulsion fixes is left intact.
+    The two filters compose rather than fight.
+
+    degree=2 fits a quadratic, which follows curvature; degree=1 fits a plane,
+    which is more aggressive and flattens more. strength blends between no
+    movement (0) and full projection (1).
+
+    pc: (N, 3). Returns (N, 3), same count, same order.
+    """
+    if strength <= 0:
+        return pc
+
+    pc = pc.astype(np.float64, copy=False)
+    _, idx = cKDTree(pc).query(pc, k=k + 1)
+    patch = pc[idx]                                     # (N, k+1, 3)
+    centroid = patch.mean(axis=1, keepdims=True)
+    cen = patch - centroid
+
+    # local frame: eigh gives ascending eigenvalues, so column 0 is the normal
+    cov = np.einsum('nki,nkj->nij', cen, cen) / (k + 1)
+    _, vecs = np.linalg.eigh(cov)
+    n_ax, t1, t2 = vecs[:, :, 0], vecs[:, :, 1], vecs[:, :, 2]
+
+    a = np.einsum('nki,ni->nk', cen, t1)                # (N, k+1)
+    b = np.einsum('nki,ni->nk', cen, t2)
+    c = np.einsum('nki,ni->nk', cen, n_ax)
+
+    if degree >= 2:
+        A = np.stack([np.ones_like(a), a, b, a * a, a * b, b * b], axis=-1)
+    else:
+        A = np.stack([np.ones_like(a), a, b], axis=-1)   # (N, k+1, m)
+
+    # ridge-regularised normal equations, batched over points
+    m = A.shape[-1]
+    AtA = np.einsum('nkm,nkl->nml', A, A) + ridge * np.eye(m)
+    Atc = np.einsum('nkm,nk->nm', A, c)
+    # trailing axis kept explicit: numpy 2.x reads a bare (N, m) rhs as a matrix
+    # rather than a stack of vectors, so this form is needed for both 1.x and 2.x
+    coef = np.linalg.solve(AtA, Atc[..., None])[..., 0]   # (N, m)
+
+    # evaluate the patch at the point's own tangential coordinates
+    self_rel = pc - centroid[:, 0, :]
+    sa = np.einsum('ni,ni->n', self_rel, t1)
+    sb = np.einsum('ni,ni->n', self_rel, t2)
+    sc = np.einsum('ni,ni->n', self_rel, n_ax)
+
+    if degree >= 2:
+        basis = np.stack([np.ones_like(sa), sa, sb, sa * sa, sa * sb, sb * sb], axis=-1)
+    else:
+        basis = np.stack([np.ones_like(sa), sa, sb], axis=-1)
+    fitted = np.einsum('nm,nm->n', coef, basis)
+
+    # move along the normal only, by the blended amount
+    return pc + (strength * (fitted - sc))[:, None] * n_ax
+
+
 def tangential_repulsion(pc, k=16, strength=0.3, iters=3):
     """
     pc: (N, 3) float array. Returns (N, 3), same count, same order.
@@ -90,15 +157,21 @@ def tangential_repulsion(pc, k=16, strength=0.3, iters=3):
     return pc
 
 
-def process_one(path, pred_root, out_root, k, strength, iters):
+def process_one(path, pred_root, out_root, k, strength, iters,
+                project_strength, project_degree, project_k):
     rel = os.path.relpath(path, pred_root)
     out_path = os.path.join(out_root, rel)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     pc = np.load(path)
     n_in = pc.shape[0]
-    out = tangential_repulsion(pc.astype(np.float64), k=k,
-                               strength=strength, iters=iters)
+    out = pc.astype(np.float64)
+    # projection first (fixes the surface), repulsion second (fixes spacing).
+    # Projection moves along the normal and repulsion along the tangent, so the
+    # order matters little, but this way repulsion has the cleaner surface.
+    out = jet_project(out, k=project_k, strength=project_strength,
+                      degree=project_degree)
+    out = tangential_repulsion(out, k=k, strength=strength, iters=iters)
 
     assert out.shape[0] == n_in, f'point count changed for {rel}'
     np.save(out_path, out.astype(np.float32))
@@ -118,6 +191,16 @@ def main():
                         help='step size as a fraction of mean point spacing. '
                              '0 is the exact identity.')
     parser.add_argument('--iters', type=int, default=3)
+    parser.add_argument('--project_strength', type=float, default=0.0,
+                        help='MLS/jet projection onto a locally fitted patch, applied '
+                             'before repulsion. 0 disables it, 1 is full projection. '
+                             'Lowers P2S, and lowers CD with it since a point d away '
+                             'from the surface is at least d from every GT point.')
+    parser.add_argument('--project_degree', type=int, default=2, choices=[1, 2],
+                        help='2 fits a quadratic and follows curvature; 1 fits a plane '
+                             'and flattens more')
+    parser.add_argument('--project_k', type=int, default=16,
+                        help='neighbours used for the patch fit')
     parser.add_argument('--workers', type=int, default=8)
     args = parser.parse_args()
 
@@ -126,11 +209,14 @@ def main():
     if not files:
         raise SystemExit(f'no {args.pred_filename} under {args.pred_root}')
 
-    print(f'{len(files)} clouds  |  k={args.k} strength={args.strength} '
-          f'iters={args.iters}')
+    print(f'{len(files)} clouds  |  project(strength={args.project_strength} '
+          f'deg={args.project_degree} k={args.project_k})  '
+          f'repulse(strength={args.strength} iters={args.iters} k={args.k})')
 
     fn = partial(process_one, pred_root=args.pred_root, out_root=args.out_root,
-                 k=args.k, strength=args.strength, iters=args.iters)
+                 k=args.k, strength=args.strength, iters=args.iters,
+                 project_strength=args.project_strength,
+                 project_degree=args.project_degree, project_k=args.project_k)
 
     if args.workers > 1 and len(files) > 1:
         with Pool(args.workers) as pool:
