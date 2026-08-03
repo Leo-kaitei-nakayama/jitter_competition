@@ -108,12 +108,14 @@ def main(args):
         np.save(os.path.join(out_dir, args.out_name), denoised.astype(np.float32))
 
     if taus:
-        # tau maps back to noise level as sigma ~= 3.16e-5 * tau^2, so this is a
-        # quick sanity read on whether the adaptive schedule is tracking the data.
+        # sigma_bar is linear in t for this schedule (sigma_bar[632] = 0.02), so
+        # sigma ~= 3.16e-5 * tau. Quick sanity read on whether the adaptive
+        # schedule is tracking the data: these should land inside the noise range
+        # the model was trained on.
         tv = np.array([t for _, t in taus], dtype=np.float64)
         print(f'[adaptive schedule] tau over {len(tv)} clouds: '
               f'min={tv.min():.0f} mean={tv.mean():.0f} max={tv.max():.0f} '
-              f'(sigma ~ {3.16e-5 * tv.min() ** 2:.4f} .. {3.16e-5 * tv.max() ** 2:.4f})')
+              f'(sigma ~ {3.16e-5 * tv.min():.4f} .. {3.16e-5 * tv.max():.4f})')
 
 
 if __name__ == '__main__':
