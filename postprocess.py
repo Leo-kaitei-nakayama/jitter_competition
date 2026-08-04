@@ -157,9 +157,26 @@ def tangential_repulsion(pc, k=16, strength=0.3, iters=3):
     return pc
 
 
+def parse_sched(spec):
+    """'0.010:0.1:1,0.015:0.5:4,999:0.6:5' -> [(limit, strength, iters), ...]"""
+    bands = []
+    for part in spec.split(','):
+        lim, s, it = part.split(':')
+        bands.append((float(lim), float(s), int(it)))
+    return sorted(bands)
+
+
 def process_one(path, pred_root, out_root, k, strength, iters,
-                project_strength, project_degree, project_k):
+                project_strength, project_degree, project_k,
+                sigma_by_rel=None, sched=None):
     rel = os.path.relpath(path, pred_root)
+    if sigma_by_rel is not None:
+        sig = sigma_by_rel.get(os.path.dirname(rel))
+        if sig is not None:
+            for lim, s, it in sched:
+                if sig <= lim:
+                    strength, iters = s, it
+                    break
     out_path = os.path.join(out_root, rel)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
@@ -202,12 +219,37 @@ def main():
     parser.add_argument('--project_k', type=int, default=16,
                         help='neighbours used for the patch fit')
     parser.add_argument('--workers', type=int, default=8)
+    parser.add_argument('--tau_csv', type=str, default=None,
+                        help='per-cloud sigma estimates from predict_on_starter.py '
+                             '--save_tau. When given, strength/iters are chosen '
+                             'per cloud from --adaptive_sched instead of the global '
+                             'values: quiet clouds sit at the projection bound where '
+                             'extra pushing only hurts, loud clouds carry tangential '
+                             'scramble worth pushing hard against.')
+    parser.add_argument('--adaptive_sched', type=str,
+                        default='0.010:0.1:1,0.015:0.5:4,999:0.6:5',
+                        help='comma list of sigma_limit:strength:iters bands, first '
+                             'matching band wins. Default was calibrated on a '
+                             'simulation against the organizers\' exact CD metric; '
+                             're-sweep on your tune split before trusting it.')
     args = parser.parse_args()
 
     files = sorted(glob.glob(os.path.join(args.pred_root, '**', args.pred_filename),
                              recursive=True))
     if not files:
         raise SystemExit(f'no {args.pred_filename} under {args.pred_root}')
+
+    sigma_by_rel, sched = None, None
+    if args.tau_csv:
+        sigma_by_rel = {}
+        with open(args.tau_csv) as f:
+            next(f)
+            for line in f:
+                rel, _, sig = line.strip().rsplit(',', 2)
+                sigma_by_rel[rel] = float(sig)
+        sched = parse_sched(args.adaptive_sched)
+        print(f'adaptive repulsion from {args.tau_csv} '
+              f'({len(sigma_by_rel)} clouds), bands {sched}')
 
     print(f'{len(files)} clouds  |  project(strength={args.project_strength} '
           f'deg={args.project_degree} k={args.project_k})  '
@@ -216,7 +258,8 @@ def main():
     fn = partial(process_one, pred_root=args.pred_root, out_root=args.out_root,
                  k=args.k, strength=args.strength, iters=args.iters,
                  project_strength=args.project_strength,
-                 project_degree=args.project_degree, project_k=args.project_k)
+                 project_degree=args.project_degree, project_k=args.project_k,
+                 sigma_by_rel=sigma_by_rel, sched=sched)
 
     if args.workers > 1 and len(files) > 1:
         with Pool(args.workers) as pool:

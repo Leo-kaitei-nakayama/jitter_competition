@@ -131,6 +131,16 @@ def main(args):
         if tv.max() >= model.schedule.T:
             print('  WARNING: tau hit the top of the schedule. The input is noisier '
                   'than the schedule can represent -- raise --max_sigma and retrain.')
+        if args.save_tau:
+            os.makedirs(os.path.dirname(args.save_tau) or '.', exist_ok=True)
+            with open(args.save_tau, 'w') as f:
+                # sigma_est undoes --sigma_scale: it estimates the TRUE noise std,
+                # which is what postprocess.py's adaptive schedule is calibrated on
+                f.write('rel,tau,sigma_est\n')
+                for rel_i, tau_i in taus:
+                    f.write(f'{rel_i},{tau_i},'
+                            f'{sig[tau_i] / args.sigma_scale:.6f}\n')
+            print(f'wrote per-cloud tau/sigma to {args.save_tau}')
 
 
 if __name__ == '__main__':
@@ -182,6 +192,10 @@ if __name__ == '__main__':
     parser.add_argument('--max_sigma', type=float, default=None,
                         help='must match training -- the timestep-to-sigma mapping is '
                              'what t_frac means to the network')
+    parser.add_argument('--save_tau', type=str, default=None,
+                        help='write a CSV of per-cloud (rel, tau, sigma_est) after '
+                             'prediction. Feed it to postprocess.py --tau_csv to make '
+                             'the repulsion filter noise-adaptive.')
     parser.add_argument('--refine_ckpt', type=str, default=None,
                         help='trained RefineHead from train_refine.py, applied per '
                              'patch after the diffusion steps. Requires --use_diffusion.')

@@ -175,6 +175,25 @@ Inference flags must match training: `--use_fusion`, `--static_depth`,
 | `--fusion_k` | 16 | paper uses 32 |
 | `--fusion_gate` | `pos` | `posfeat` matches the paper; changes parameter shapes |
 
+## Noise-adaptive repulsion (sim-calibrated, verify on tune before trusting)
+
+A simulation against the organizers' exact CD metric (ideal surface projection
+plus calibrated tangential scramble, unit sphere, 50k points) showed the
+optimal repulsion strength flips sign with noise level: at σ≈0.008 the model
+already sits at the projection bound and the production 0.3/2 setting *costs*
+~1 CD point versus a gentle 0.1/1, while at σ≥0.014 it leaves ~3 CD points on
+the table versus 0.5–0.6 strength at 4–5 iters. The filter can now read the
+per-cloud σ̂ the model already estimates:
+
+```bash
+predict_on_starter.py ... --save_tau results/<run>/taus.csv
+postprocess.py --pred_root ... --out_root ... --tau_csv results/<run>/taus.csv
+```
+
+`--adaptive_sched` holds the σ→(strength, iters) bands; the default is the
+simulation's optimum. Without `--tau_csv` nothing changes. The calibration is
+synthetic — sweep the bands on the tune split before submitting with them.
+
 ## Running on a different dataset
 
 Nothing about the pipeline is tied to this ShapeNet layout, but four things are
