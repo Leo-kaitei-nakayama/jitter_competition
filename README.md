@@ -11,17 +11,54 @@ runtime. Trained only on the competition's own ShapeNet data.
 
 ## Results
 
-Measured on a 30-sample local eval set built by `make_eval_set.py`
-(σ ∈ 0.005–0.020, matching the competition spec). Scoring is the organizers'
-`evaluate.py`: `0.5 × CD_score + 0.5 × P2S_score`.
+Local eval set of 100 shapes built by `make_eval_set.py` (σ ∈ 0.005–0.020,
+matching the competition spec), split 60 for tuning and 40 held out. Scoring is
+the organizers' `evaluate.py`: `0.5 × CD_score + 0.5 × P2S_score`.
 
-| model | inference | CD | P2S | **final** |
-|---|---|---|---|---|
-| `asdn-epoch039` (plain ASDN baseline) | single pass | 60.19 | 85.33 | **72.76** |
-| `asdn_diffusion/epoch049` | fusion + adaptive diffusion, σ×1.5 | 62.56 | 91.32 | **76.94** |
+| configuration | CD | P2S | **final** |
+|---|---|---|---|
+| `asdn-epoch039`, plain ASDN, single pass | 60.19 | 85.33 | **72.76** |
+| single model + diffusion + repulsion | 64.36 | 90.15 | 77.26 |
+| **ensemble + repulsion — holdout, 40 unseen** | **64.58** | **92.06** | **78.32** |
 
-Local scores are only comparable against each other — the eval set differs from
-the competition's test set.
+The holdout scored above the tune set (78.32 vs 77.96), so the tuning
+generalizes. Local scores are only comparable against each other; the eval set
+is not the competition's test set.
+
+### Best known configuration
+
+```bash
+# two models, each at its own calibrated sigma
+predict_on_starter.py --ckpt experiments/asdn_diffusion/asdn-epoch049.pkl \
+    --use_fusion --static_depth --use_diffusion --diffusion_L 3 --sigma_scale 1.5
+predict_on_starter.py --ckpt experiments/asdn_posfeat/asdn-epoch044.pkl \
+    --use_fusion --static_depth --fusion_gate posfeat --fusion_k 32 \
+    --use_diffusion --diffusion_L 3 --sigma_scale 1.2
+
+ensemble.py --weights 0.6 0.4        # blend, order matches --pred_roots
+postprocess.py --strength 0.3 --iters 2 --k 16    # repulsion; projection off
+```
+
+Note the posfeat model scores ~1 point *worse* than the baseline on its own, yet
+adds ~0.7 to the ensemble — its errors point in different directions.
+
+### What was tested and rejected
+
+Kept in the repo behind default-off flags so they are not retried blind:
+
+| idea | result |
+|---|---|
+| `--exact_score` (exact displacement target) | −9.6 at matched epoch |
+| jet/MLS projection (`--project_strength`) | −0.9 to −3.3, monotonic in strength |
+| `--fusion_gate posfeat --fusion_k 32` alone | −1.0 even at its own best sigma |
+| per-cloud adaptive `sigma_scale` | +0.16, not worth the mechanism |
+| more diffusion steps (L > 3) | monotonically worse to L=12 |
+
+Jet projection failing is informative: the model's output is already smoother
+than a local polynomial fit of itself, so any filter that only re-smooths the
+denoised points — bilateral, MLS, Laplacian, WLOP's projection half — should be
+expected to fail the same way. Repulsion worked because spacing is a property
+of the point distribution, not of the surface estimate.
 
 ## Pipeline
 
