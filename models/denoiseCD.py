@@ -234,6 +234,45 @@ class DenoiseNetCD(nn.Module):
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
+    @staticmethod
+    def select_stitch_source(pid_np, pdist_np):
+        """Pick, for every cloud point, which patch's denoised coordinate to keep.
+
+        Replaces the dense construction all three stitching arrays shared:
+
+            all_dists = np.full((num_patches, N), inf); all_dists[pi, pid[pi]] = ...
+            best = np.exp(-all_dists).argmax(axis=0)
+            pos_map = np.full((num_patches, N), -1); ...
+
+        Those are O(num_patches * N) = O(0.006 * N^2) bytes -- 240 MB at N=50k,
+        24 GB at N=500k -- while >99% of the entries are the inf/-1 filler,
+        because each patch covers only patch_size of the N points. This walks
+        the (num_patches, patch_size) covering pairs instead: O(seed_k * N).
+
+        Equivalence with the dense argmax, including its tie-breaks: lexsort is
+        stable and the flat array is patch-major, so among equal (point, weight)
+        pairs the lowest patch index wins -- exactly what argmax returned. The
+        weight is computed with the same float32 exp. Uncovered points simply
+        never appear, matching the pos_map[argmax]= -1 exclusion; the caller's
+        padding loop handles them as before.
+
+        Args:
+            pid_np:   (num_patches, patch_size) int   -- point ids per patch
+            pdist_np: (num_patches, patch_size) float -- normalized distances
+        Returns:
+            sel_patch (C,) int32, sel_pos (C,) int32: source patch and row for
+            each covered point, ordered by ascending point id.
+        """
+        K = pid_np.shape[1]
+        flat_pid = pid_np.reshape(-1)
+        flat_w = np.exp(-pdist_np.reshape(-1).astype(np.float32))
+        order = np.lexsort((-flat_w, flat_pid))
+        pid_sorted = flat_pid[order]
+        keep = np.ones(order.size, dtype=bool)
+        keep[1:] = pid_sorted[1:] != pid_sorted[:-1]
+        sel = order[keep]
+        return ((sel // K).astype(np.int32), (sel % K).astype(np.int32))
+
     def patch_based_denoise(self, pcl_noisy, patch_size=1000, seed_k=5,
                              seed_k_alpha=10, num_modules_to_use=None):
         """
@@ -255,15 +294,10 @@ class DenoiseNetCD(nn.Module):
         patch_dists, point_idxs_in_main_pcd = patch_dists[0], point_idxs_in_main_pcd[0]
         patch_dists = patch_dists / patch_dists[:, -1].unsqueeze(1).repeat(1, patch_size)
 
-        # For each original point, distance-derived weight per covering patch
-        all_dists_np = np.full((num_patches, N), np.inf, dtype=np.float32)
+        # For each original point, the best covering patch (linear memory)
         pid_np = point_idxs_in_main_pcd.numpy()
         pdist_np = patch_dists.numpy()
-        for pi in range(num_patches):
-            all_dists_np[pi, pid_np[pi]] = pdist_np[pi]
-
-        weights = np.exp(-1 * all_dists_np)              # (num_patches, N)
-        best_weights_idx = weights.argmax(axis=0)         # (N,)
+        sel_patch_np, sel_pos_np = self.select_stitch_source(pid_np, pdist_np)
 
         patches_denoised = []
 
@@ -282,21 +316,7 @@ class DenoiseNetCD(nn.Module):
 
         # Patch stitching: for each original point, take its denoised coordinate
         # from the patch that covers it with the highest weight.
-        # (Original used a per-point boolean-mask list comprehension; Jittor
-        # can't index with numpy bool masks, so build integer gather indices:
-        # pos_map[pi, n] = position j of original point n inside patch pi.)
-        pos_map = np.full((num_patches, N), -1, dtype=np.int64)
-        col = np.arange(patch_size, dtype=np.int64)
-        for pi in range(num_patches):
-            pos_map[pi, pid_np[pi]] = col
-
-        point_ids = np.arange(N, dtype=np.int64)
-        gather_pos = pos_map[best_weights_idx, point_ids]      # (N,) position in its best patch
-        covered = gather_pos >= 0                               # uncovered points -> pad later
-
-        sel_patch = jt.array(best_weights_idx[covered].astype(np.int32))
-        sel_pos = jt.array(gather_pos[covered].astype(np.int32))
-        pcl_denoised = patches_denoised[sel_patch, sel_pos]     # (N_covered, 3)
+        pcl_denoised = patches_denoised[jt.array(sel_patch_np), jt.array(sel_pos_np)]
 
         while pcl_denoised.shape[0] != N:
             pcl_denoised = jt.concat(
@@ -346,13 +366,9 @@ class DenoiseNetCD(nn.Module):
         patches = patches - seed_pnts_1
         patch_dists, point_idxs_in_main_pcd = patch_dists[0], point_idxs_in_main_pcd[0]
         patch_dists = patch_dists / patch_dists[:, -1].unsqueeze(1).repeat(1, patch_size)
-        all_dists_np = np.full((num_patches, N), np.inf, dtype=np.float32)
         pid_np = point_idxs_in_main_pcd.numpy()
         pdist_np = patch_dists.numpy()
-        for pi in range(num_patches):
-            all_dists_np[pi, pid_np[pi]] = pdist_np[pi]
-        weights = np.exp(-1 * all_dists_np)
-        best_weights_idx = weights.argmax(axis=0)
+        sel_patch_np, sel_pos_np = self.select_stitch_source(pid_np, pdist_np)
 
         patch_step = int(N / (seed_k_alpha * patch_size))
         assert patch_step > 0, "Seed_k_alpha needs to be decreased to increase patch_step!"
@@ -382,16 +398,7 @@ class DenoiseNetCD(nn.Module):
                 refine_head=refine_head))
         patches_denoised = jt.concat(patches_denoised, dim=0)
         patches_denoised = patches_denoised + seed_pnts_1
-        pos_map = np.full((num_patches, N), -1, dtype=np.int64)
-        col = np.arange(patch_size, dtype=np.int64)
-        for pi in range(num_patches):
-            pos_map[pi, pid_np[pi]] = col
-        point_ids = np.arange(N, dtype=np.int64)
-        gather_pos = pos_map[best_weights_idx, point_ids]
-        covered = gather_pos >= 0
-        sel_patch = jt.array(best_weights_idx[covered].astype(np.int32))
-        sel_pos = jt.array(gather_pos[covered].astype(np.int32))
-        pcl_denoised = patches_denoised[sel_patch, sel_pos]
+        pcl_denoised = patches_denoised[jt.array(sel_patch_np), jt.array(sel_pos_np)]
         while pcl_denoised.shape[0] != N:
             pcl_denoised = jt.concat(
                 (pcl_denoised, pcl_denoised[pcl_denoised.shape[0] - 1].unsqueeze(0)), dim=0)

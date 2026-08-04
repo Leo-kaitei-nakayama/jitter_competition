@@ -240,9 +240,17 @@ def interpolation(xyz, new_xyz, feat, offset, new_offset, k=3):
     return jt.concat(out_list, dim=0)
 
 
-def knn_points(query, ref, K=1, return_nn=False):
+def knn_points(query, ref, K=1, return_nn=False, max_chunk_elems=200_000_000):
     """
     Drop-in equivalent of pytorch3d.ops.knn_points for batched tensors.
+
+    The (Nq, Nr) distance matrix is built in row chunks of at most
+    max_chunk_elems elements (default ~800 MB float32), so memory stays bounded
+    when both sides are large -- e.g. patch seeds against a full round-B-sized
+    cloud, where Nq grows with N and the single matrix would be O(N^2). Each
+    row is argsorted over the same full ref axis as before, so chunked results
+    are identical to unchunked ones; inputs that fit take the old single-shot
+    path untouched.
 
     Args:
         query: (B, Nq, 3)
@@ -258,10 +266,22 @@ def knn_points(query, ref, K=1, return_nn=False):
     dists_list, idx_list, nn_list = [], [], []
 
     for b in range(B):
-        sqd = _pairwise_sqdist(query[b], ref[b])  # (Nq, Nr)
-        order = jt.argsort(sqd, dim=-1)
-        idx_b = order[0][:, :K]     # (Nq,K)
-        dist_b = order[1][:, :K]    # (Nq,K)
+        Nq, Nr = query.shape[1], ref.shape[1]
+        rows = max(1, min(Nq, int(max_chunk_elems // max(Nr, 1))))
+        idx_chunks, dist_chunks = [], []
+        for s in range(0, Nq, rows):
+            sqd = _pairwise_sqdist(query[b][s:s + rows], ref[b])  # (rows, Nr)
+            order = jt.argsort(sqd, dim=-1)
+            idx_chunks.append(order[0][:, :K])
+            dist_chunks.append(order[1][:, :K])
+            if rows < Nq:
+                # force execution so the chunk's distance matrix is freed
+                # before the next one is built; otherwise lazy evaluation can
+                # keep every chunk alive and the chunking saves nothing
+                idx_chunks[-1].sync()
+                dist_chunks[-1].sync()
+        idx_b = idx_chunks[0] if len(idx_chunks) == 1 else jt.concat(idx_chunks, dim=0)
+        dist_b = dist_chunks[0] if len(dist_chunks) == 1 else jt.concat(dist_chunks, dim=0)
         dists_list.append(dist_b.unsqueeze(0))
         idx_list.append(idx_b.unsqueeze(0))
         if return_nn:

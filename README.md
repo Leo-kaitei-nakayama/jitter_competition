@@ -78,6 +78,7 @@ Kept in the repo behind default-off flags so they are not retried blind:
 | blending the output back toward the noisy input | monotonically worse |
 | a bigger refinement head | same 13%, no gain |
 | ensembling two REFINED models | −0.10 vs one refined model |
+| entropy-ratio adaptive depth (wire the trained classifier) | measured before building (`measure_classifier.py`): on the round-A noise range the supervision target itself barely tracks noise — corr(target, σ) = +0.13 with per-bin means flat at 0.98–1.01 — so even a perfect classifier routes depth ~randomly. Backbone retrain skipped. |
 
 Jet projection failing is informative: the model's output is already smoother
 than a local polynomial fit of itself, so any filter that only re-smooths the
@@ -112,6 +113,10 @@ check_spacing.py   →  is the output clumped? (justified the repulsion filter)
 check_learnable.py →  is the residual predictable? (justified the refine head)
 make_stress_set.py →  synthetic probes: sharp edges, thin plates, noise beyond
                       the training range
+measure_classifier.py → is the depth classifier worth wiring in?
+                      (measured no on round-A noise; re-run on round B's range)
+bench_stitch.py    →  linear-memory stitching == old dense stitching, plus a
+                      memory table for large-N clouds
 ```
 
 `bridge/data_bridge.py` adapts the competition's data layout to the ASDN loss:
@@ -231,13 +236,32 @@ backed up in `checkpoints/`), but the 78.99 backbone was trained and is run
 with `--static_depth`, which bypasses it entirely — and a backbone trained at
 a fixed depth has never exercised its shallow exit paths, so flipping adaptive
 depth on at inference without retraining produces garbage for any sample
-routed shallow. Making the mechanism real means: (1) `measure_classifier.py`
-to check the classifier is worth wiring in, (2) retrain the backbone without
-`--static_depth`, passing `--classify_ckpt`, `--no_bn_sync`, and (ideally)
-`--init_ckpt checkpoints/asdn-epoch049.pkl` to warm-start. Note the classifier
-receives no gradient during denoiser training regardless (ρ is converted to a
-Python float in `assign_n_layer_based_on_rho`), so it keeps exactly the
-weights it was given.
+routed shallow. `measure_classifier.py` measured whether wiring it in is worth
+that retrain, and the answer was no — see the rejected-ideas table. Measured
+at σ ∈ 0.005–0.05 (round-B-like) the entropy ratio does wake up —
+corr(target, σ) = +0.386, per-bin means monotonic 0.99 → 1.15 — but 60% of
+targets then sit above the tanh output cap, so the classifier saturates at
+1.0 and would need an activation fix plus retraining. Even then the
+score-norm σ̂ estimate that drives the adaptive schedule is the stronger,
+already-working noise signal; if depth adaptivity is ever revisited, drive it
+from σ̂, not from the entropy classifier. Re-run `measure_classifier.py` with
+round B's actual noise range before reopening any of this. The mechanics for
+the retrain exist if it is ever justified: train without `--static_depth`,
+passing `--classify_ckpt`, `--no_bn_sync`, and `--init_ckpt` to warm-start.
+The classifier receives no gradient during denoiser training regardless (ρ is
+converted to a Python float in `assign_n_layer_based_on_rho`), so it keeps
+exactly the weights it was given.
+
+**Large clouds: stitching and seed-KNN are linear-memory.** The patch
+stitching used to build three dense `(num_patches, N)` arrays — O(0.006·N²)
+bytes, 240 MB at N=50k but 24 GB at N=500k — and `knn_points` materialized the
+full seeds×cloud distance matrix. Both are now bounded:
+`DenoiseNetCD.select_stitch_source` walks only the actual patch-point covering
+pairs (fuzz-tested identical to the dense argmax, ties included), and
+`knn_points` processes query rows in ~800 MB chunks with per-row results
+unchanged. `bench_stitch.py` re-verifies both claims end-to-end on synthetic
+clouds of any size — run it after touching either code path, and once on any
+machine that will serve round B.
 
 **Noise is specified by standard deviation.** `numpy.random.laplace(0, b)` has
 std `b·√2`; passing the target std as the scale produces noise 1.41× too strong.
