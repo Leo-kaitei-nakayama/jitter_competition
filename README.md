@@ -36,19 +36,32 @@ competition's test set.
 ### Best known configuration
 
 ```bash
-# two models, each at its own calibrated sigma
 predict_on_starter.py --ckpt experiments/asdn_diffusion/asdn-epoch049.pkl \
-    --use_fusion --static_depth --use_diffusion --diffusion_L 3 --sigma_scale 1.5
-predict_on_starter.py --ckpt experiments/asdn_posfeat/asdn-epoch044.pkl \
-    --use_fusion --static_depth --fusion_gate posfeat --fusion_k 32 \
-    --use_diffusion --diffusion_L 3 --sigma_scale 1.2
+    --use_fusion --static_depth \
+    --use_diffusion --diffusion_L 3 --sigma_scale 1.5 \
+    --refine_ckpt experiments/refine/refine-epoch009.pkl
 
-ensemble.py --weights 0.6 0.4        # blend, order matches --pred_roots
 postprocess.py --strength 0.3 --iters 2 --k 16    # repulsion; projection off
 ```
 
-Note the posfeat model scores ~1 point *worse* than the baseline on its own, yet
-adds ~0.7 to the ensemble — its errors point in different directions.
+### The refinement stage
+
+The largest single gain after the noise calibration, and the one that made
+ensembling redundant. `models/refine.py` is a small EdgeConv head reading the
+frozen model's output position and its encoder feature at that position, and
+predicting a corrective displacement; the backbone stays frozen under
+`jt.no_grad()` with every parameter `stop_grad`'d. Worth +1.33 on the tune set
+and +0.67 on the holdout over the same model unrefined.
+
+It was built only after `check_learnable.py` measured the residual error's
+spatial autocorrelation at +0.35, implying roughly 12% of the error variance is
+predictable from local context. The head converged to a 13% reduction in squared
+error — and a head with twice the width and an extra layer reached the same 13%,
+so that is the signal available rather than a capacity limit.
+
+Train it with `train_refine.py`; its `--sigma_scale`, `--diffusion_L` and fusion
+flags must match how the frozen model will be run at inference, since the head
+learns to correct whatever that configuration actually produces.
 
 ### What was tested and rejected
 
@@ -61,6 +74,10 @@ Kept in the repo behind default-off flags so they are not retried blind:
 | `--fusion_gate posfeat --fusion_k 32` alone | −1.0 even at its own best sigma |
 | per-cloud adaptive `sigma_scale` | +0.16, not worth the mechanism |
 | more diffusion steps (L > 3) | monotonically worse to L=12 |
+| four-member ensemble (earlier epochs) | −0.86 |
+| blending the output back toward the noisy input | monotonically worse |
+| a bigger refinement head | same 13%, no gain |
+| ensembling two REFINED models | −0.10 vs one refined model |
 
 Jet projection failing is informative: the model's output is already smoother
 than a local polynomial fit of itself, so any filter that only re-smooths the
@@ -91,6 +108,10 @@ analysis.py        →  breakdown by category and noise level
 visualize_errors.py→  interactive per-point error HTML
 measure_cd_floor.py→  how much CD headroom is reachable
 bench_fps.py       →  correctness + speed check for the vectorized FPS
+check_spacing.py   →  is the output clumped? (justified the repulsion filter)
+check_learnable.py →  is the residual predictable? (justified the refine head)
+make_stress_set.py →  synthetic probes: sharp edges, thin plates, noise beyond
+                      the training range
 ```
 
 `bridge/data_bridge.py` adapts the competition's data layout to the ASDN loss:
@@ -141,7 +162,8 @@ Inference flags must match training: `--use_fusion`, `--static_depth`,
 | flag | default | notes |
 |---|---|---|
 | `--sigma_scale` | 1.5 | Corrects a bias in the Eq. 15 noise estimator, which reads low and causes under-denoising. Measured optimum; **re-sweep after any retrain.** |
-| `--diffusion_L` | 5 | reverse sampling steps |
+| `--diffusion_L` | 3 | reverse sampling steps; swept 1-12, monotonic above 3 |
+| `--refine_ckpt` | none | trained RefineHead from `train_refine.py`, applied per patch |
 | `--static_depth` | off | pin all samples to 4 layers; required under `mpirun` |
 | `--t_norm` | `T` | `t/T`. The paper's `tau` makes the relative timestep identical for every cloud, which cancels the adaptive schedule — keep `T`. |
 | `--mask_size` | 256 | K_p in Algorithm 1: only the innermost patch points carry the loss |
