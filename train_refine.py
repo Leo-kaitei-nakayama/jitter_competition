@@ -55,7 +55,8 @@ def main(args):
     # ---- frozen backbone ----
     model = DenoiseNetCD(fusion_k=args.fusion_k, fusion_gate=args.fusion_gate,
                          fusion_include_self=args.fusion_include_self,
-                         static_depth=args.static_depth)
+                         static_depth=args.static_depth,
+                         max_sigma=args.max_sigma)
     if args.use_fusion:
         model.feature_nets.use_fusion = True
     model.load(args.ckpt)
@@ -79,6 +80,7 @@ def main(args):
         noise_min=args.noise_min, noise_max=args.noise_max,
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, noise_dist=args.noise_dist,
+        mesh_name=args.mesh_name,
     )
 
     sched = model.schedule
@@ -151,6 +153,9 @@ if __name__ == '__main__':
     p.add_argument('--patch_size', type=int, default=1000)
     p.add_argument('--noise_min', type=float, default=0.005)
     p.add_argument('--noise_max', type=float, default=0.02)
+    p.add_argument('--mesh_name', type=str, default='models/model_normalized.obj')
+    p.add_argument('--max_sigma', type=float, default=None,
+                   help='must match the frozen checkpoint and inference')
     p.add_argument('--noise_dist', type=str, default='laplace',
                    choices=['laplace', 'gaussian'])
     p.add_argument('--batch_size', type=int, default=48)

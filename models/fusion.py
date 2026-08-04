@@ -219,8 +219,27 @@ class DiffusionSchedule:
         find_t_for_sigma(sigma) -> nearest timestep whose sigma_bar matches
         estimate_tau(score_norms) -> adaptive start timestep, Eq. 15 + Eq. 16
     """
-    def __init__(self, T=1000, beta_T=2e-6):
+    def __init__(self, T=1000, beta_T=2e-6, max_sigma=None):
+        """
+        max_sigma overrides beta_T with the largest noise level the schedule can
+        represent, which is the more useful handle when the dataset changes.
+
+        The default beta_T=2e-6 caps sigma_bar at 0.0316, which suited a training
+        range of 0.005-0.020. Beyond that cap find_t_for_sigma silently returns
+        T for everything, so every loud cloud gets told "maximum noise" and the
+        timestep stops carrying information. A dataset with noise above ~3% needs
+        this raised.
+
+        Since sigma_bar_T^2 = sum(beta) = beta_T*(T+1)/2, the conversion is
+        beta_T = 2*max_sigma^2/(T+1).
+
+        It must match between training and inference: the timestep-to-sigma
+        mapping is what t_frac means to the network.
+        """
         self.T = T
+        if max_sigma is not None:
+            beta_T = 2.0 * float(max_sigma) ** 2 / (T + 1)
+        self.beta_T = beta_T
         betas = np.linspace(0.0, beta_T, T+1, dtype=np.float64)
         alphas = 1.0 - betas
         alpha_bars = np.cumprod(alphas)

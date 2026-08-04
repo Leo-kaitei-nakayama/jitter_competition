@@ -48,6 +48,7 @@ def main(args):
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
+        mesh_name=args.mesh_name,
     )
 
     for epoch in range(args.epochs):
@@ -79,6 +80,8 @@ if __name__ == '__main__':
     parser.add_argument('--patch_size', type=int, default=1000)
     parser.add_argument('--noise_min', type=float, default=0.005)
     parser.add_argument('--noise_max', type=float, default=0.02)
+    parser.add_argument('--mesh_name', type=str, default='models/model_normalized.obj',
+                        help='path to the mesh inside each datalist entry')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--lr', type=float, default=5e-4)

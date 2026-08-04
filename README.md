@@ -170,6 +170,51 @@ Inference flags must match training: `--use_fusion`, `--static_depth`,
 | `--fusion_k` | 16 | paper uses 32 |
 | `--fusion_gate` | `pos` | `posfeat` matches the paper; changes parameter shapes |
 
+## Running on a different dataset
+
+Nothing about the pipeline is tied to this ShapeNet layout, but four things are
+calibrated to *this* data and must be revisited.
+
+**1. Point the scripts at the new data.** `--data_root`, `--datalist`, and
+`--mesh_name` if the meshes sit somewhere other than
+`models/model_normalized.obj` inside each entry. A datalist line is just a
+relative path joined to the root, so any directory shape works.
+
+**2. Set the noise range, and check the schedule can hold it.** `--noise_min`,
+`--noise_max`, `--noise_dist`. Both bounds are STANDARD DEVIATIONS.
+
+The diffusion schedule can only represent sigma up to **0.0316** by default.
+Above that, `find_t_for_sigma` returns the last timestep for everything, so
+every loud cloud is told the same thing and the timestep stops carrying
+information. For noisier data raise it:
+
+```bash
+--max_sigma 0.06        # on train_on_starter.py, train_refine.py AND predict_on_starter.py
+```
+
+It must match across all three -- the timestep-to-sigma mapping is what the
+relative timestep means to the network. `predict_on_starter.py` warns if the
+estimated tau hits the top of the schedule.
+
+**3. Re-sweep `--sigma_scale`.** It is a calibration constant, not a universal
+one: 1.5 corrects a bias measured on this data, and it shifted to 1.2 for a
+model that differed only in its fusion gate. Sweep 0.8-2.0 against a local eval
+set before trusting any score.
+
+**4. Retrain the refinement head.** It learns one specific frozen model's
+systematic error, so a new backbone needs a new head. Its `--sigma_scale`,
+`--diffusion_L` and fusion flags must match how that backbone will be run at
+inference, since it corrects whatever that configuration actually produces.
+
+Then rebuild the local eval set from the new training data and re-measure --
+`make_eval_set.py`, split into tune and holdout, and treat the previous scores
+as belonging to the old dataset only.
+
+`make_stress_set.py` is worth running early on new data: it generates its own
+geometry, so it works without any dataset at all, and it answers whether the
+model survives noise beyond its training range before you find out from a
+leaderboard.
+
 ## Notes and known issues
 
 **Multi-GPU requires `--static_depth`.** Jittor's BatchNorm becomes SyncBN under

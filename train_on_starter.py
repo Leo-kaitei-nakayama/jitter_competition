@@ -31,7 +31,8 @@ def main(args):
                          classify_frame_knn=args.classify_frame_knn,
                          fusion_k=args.fusion_k, fusion_gate=args.fusion_gate,
                          fusion_include_self=args.fusion_include_self,
-                         static_depth=args.static_depth)
+                         static_depth=args.static_depth,
+                         max_sigma=args.max_sigma)
     if args.use_fusion:
         model.feature_nets.use_fusion = True
     
@@ -53,6 +54,7 @@ def main(args):
         shuffle=True,
         num_workers=args.num_workers,
         noise_dist=args.noise_dist,
+        mesh_name=args.mesh_name,
     )
 
     for epoch in range(args.epochs):
@@ -98,6 +100,14 @@ if __name__ == '__main__':
     parser.add_argument('--patch_size', type=int, default=1000)
     parser.add_argument('--noise_min', type=float, default=0.005)
     parser.add_argument('--noise_max', type=float, default=0.02)
+    parser.add_argument('--mesh_name', type=str, default='models/model_normalized.obj',
+                        help='path to the mesh inside each datalist entry. Change this '
+                             'when a new dataset lays its files out differently.')
+    parser.add_argument('--max_sigma', type=float, default=None,
+                        help='largest noise level the diffusion schedule can represent '
+                             '(default 0.0316). Raise it for a dataset noisier than ~3%%, '
+                             'or every loud cloud gets clamped to the same timestep. '
+                             'predict_on_starter.py must be given the same value.')
     parser.add_argument('--noise_dist', type=str, default='laplace',
                         choices=['laplace', 'gaussian'],
                         help='additive noise shape. Either way noise_min/max are '

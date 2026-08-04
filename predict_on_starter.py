@@ -37,7 +37,8 @@ def load_model(args):
     otherwise the fusion head's weights will not line up."""
     model = DenoiseNetCD(fusion_k=args.fusion_k, fusion_gate=args.fusion_gate,
                          fusion_include_self=args.fusion_include_self,
-                         static_depth=args.static_depth)
+                         static_depth=args.static_depth,
+                         max_sigma=args.max_sigma)
     if args.use_fusion:
         model.feature_nets.use_fusion = True
     model.load(args.ckpt)
@@ -118,14 +119,18 @@ def main(args):
         np.save(os.path.join(out_dir, args.out_name), denoised.astype(np.float32))
 
     if taus:
-        # sigma_bar is linear in t for this schedule (sigma_bar[632] = 0.02), so
-        # sigma ~= 3.16e-5 * tau. Quick sanity read on whether the adaptive
-        # schedule is tracking the data: these should land inside the noise range
-        # the model was trained on.
-        tv = np.array([t for _, t in taus], dtype=np.float64)
+        # Read sigma off the schedule rather than assuming a constant, so this
+        # stays correct when --max_sigma changes it. Sanity check: these should
+        # land inside the noise range the model was trained on.
+        tv = np.array([t for _, t in taus], dtype=np.int64)
+        sig = model.schedule.sigma_bars
         print(f'[adaptive schedule] tau over {len(tv)} clouds: '
-              f'min={tv.min():.0f} mean={tv.mean():.0f} max={tv.max():.0f} '
-              f'(sigma ~ {3.16e-5 * tv.min():.4f} .. {3.16e-5 * tv.max():.4f})')
+              f'min={tv.min()} mean={tv.mean():.0f} max={tv.max()} '
+              f'(sigma ~ {sig[tv.min()]:.4f} .. {sig[tv.max()]:.4f}, '
+              f'schedule caps at {sig[-1]:.4f})')
+        if tv.max() >= model.schedule.T:
+            print('  WARNING: tau hit the top of the schedule. The input is noisier '
+                  'than the schedule can represent -- raise --max_sigma and retrain.')
 
 
 if __name__ == '__main__':
@@ -174,6 +179,9 @@ if __name__ == '__main__':
                         help='must match training')
     parser.add_argument('--static_depth', action='store_true',
                         help='must match training')
+    parser.add_argument('--max_sigma', type=float, default=None,
+                        help='must match training -- the timestep-to-sigma mapping is '
+                             'what t_frac means to the network')
     parser.add_argument('--refine_ckpt', type=str, default=None,
                         help='trained RefineHead from train_refine.py, applied per '
                              'patch after the diffusion steps. Requires --use_diffusion.')
