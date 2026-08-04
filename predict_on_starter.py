@@ -22,6 +22,7 @@ import jittor as jt
 from tqdm import tqdm
 
 from models.denoiseCD import DenoiseNetCD
+from models.refine import RefineHead
 from bridge.data_bridge import ShapeNetNoisyPredictDataset, normalize_unit_sphere
 
 jt.flags.use_cuda = 1
@@ -41,11 +42,19 @@ def load_model(args):
         model.feature_nets.use_fusion = True
     model.load(args.ckpt)
     model.eval()
-    return model
+
+    head = None
+    if args.refine_ckpt is not None:
+        head = RefineHead(feat_dim=args.feat_dim, hidden=args.hidden,
+                          k=args.head_k, n_layers=args.head_layers)
+        head.load(args.refine_ckpt)
+        head.eval()
+        print(f'refine head: {args.refine_ckpt}')
+    return model, head
 
 
 def main(args):
-    model = load_model(args)
+    model, refine_head = load_model(args)
     model.set_predict(True) if hasattr(model, 'set_predict') else None
     model.eval()
 
@@ -88,6 +97,7 @@ def main(args):
                     sigma_estimator=args.sigma_estimator,
                     t_norm=args.t_norm,
                     return_tau=True,
+                    refine_head=refine_head,
                 )
                 taus.append((rel, tau))
             else:
@@ -164,6 +174,17 @@ if __name__ == '__main__':
                         help='must match training')
     parser.add_argument('--static_depth', action='store_true',
                         help='must match training')
+    parser.add_argument('--refine_ckpt', type=str, default=None,
+                        help='trained RefineHead from train_refine.py, applied per '
+                             'patch after the diffusion steps. Requires --use_diffusion.')
+    parser.add_argument('--feat_dim', type=int, default=32,
+                        help='refine head: encoder feature width, must match training')
+    parser.add_argument('--hidden', type=int, default=64,
+                        help='refine head: hidden width, must match training')
+    parser.add_argument('--head_k', type=int, default=16,
+                        help='refine head: neighbours, must match training')
+    parser.add_argument('--head_layers', type=int, default=2,
+                        help='refine head: EdgeConv layers, must match training')
 
     parser.add_argument('--patch_size', type=int, default=1000)
     parser.add_argument('--niters', type=int, default=1)

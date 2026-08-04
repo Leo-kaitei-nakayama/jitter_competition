@@ -307,7 +307,7 @@ class DenoiseNetCD(nn.Module):
                                        seed_k_alpha=10, L=5, t_start=632,
                                        adaptive=True, sigma_scale=1.0,
                                        sigma_estimator='var', t_norm='T',
-                                       return_tau=False):
+                                       return_tau=False, refine_head=None):
         """
         Adaptive and Iterative Denoising (paper Algorithm 2).
 
@@ -376,7 +376,8 @@ class DenoiseNetCD(nn.Module):
         patches_denoised = []
         for s in chunk_starts:
             patches_denoised.append(self.denoise_langevin_dynamics_diffusion(
-                patches[s:s + patch_step], L=L, t_start=tau, t_norm=t_norm))
+                patches[s:s + patch_step], L=L, t_start=tau, t_norm=t_norm,
+                refine_head=refine_head))
         patches_denoised = jt.concat(patches_denoised, dim=0)
         patches_denoised = patches_denoised + seed_pnts_1
         pos_map = np.full((num_patches, N), -1, dtype=np.int64)
@@ -463,7 +464,25 @@ class DenoiseNetCD(nn.Module):
         return self.feature_nets(patches, feat_in, offset,
                                  feat_T=feat_T, t_frac=t_frac, return_feat=True)
 
-    def denoise_langevin_dynamics_diffusion(self, patches, L=5, t_start=632, t_norm='T'):
+    def refine_patches(self, patches, refine_head):
+        """
+        Apply a trained RefineHead to already-denoised patches.
+
+        Runs the frozen encoder once more so the features line up with the
+        denoised positions rather than the input ones, then adds the head's
+        corrective displacement. Kept separate from the sampler so the same code
+        path serves training and inference.
+
+        patches: (B, K, 3) denoised, still centered on their seeds.
+        """
+        if refine_head is None:
+            return patches
+        with jt.no_grad():
+            _, feat = self._patch_forward(patches, feat_T=None, t_frac_val=0.0)
+        return patches + refine_head(patches, feat)
+
+    def denoise_langevin_dynamics_diffusion(self, patches, L=5, t_start=632, t_norm='T',
+                                             refine_head=None):
         """
         Diffusion-style iterative denoising for a batch of patches (paper Alg. 2,
         lines 5-13). Caches E(x^τ̂) once (original patch feature) and runs L
@@ -500,4 +519,4 @@ class DenoiseNetCD(nn.Module):
 
                 x_t = x_t + self.schedule.step_coef(t, t_next) * score
 
-        return x_t
+        return self.refine_patches(x_t, refine_head)
