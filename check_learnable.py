@@ -93,9 +93,22 @@ def main():
 
         feats, normals = local_features(p_n, k=args.k)
 
-        # exact residual, projected onto the local normal -- the component that
-        # moves a point toward or away from the surface
-        resid = g_n - p_n
+        # Residual toward the NEAREST clean point, not the same-index one.
+        #
+        # The model moves points along the surface, so output point i is near
+        # the surface but generally not near clean point i -- that tangential
+        # scrambling is several point spacings wide and is arbitrary, since
+        # which clean point a given output point drifted toward carries no
+        # information. Using g_n[i] - p_n[i] measures mostly that scrambling,
+        # which leaks into the normal component through imperfect normals and
+        # swamps the quantity of interest.
+        #
+        # A stage-2 network would reduce distance to the SURFACE, so that is
+        # what the target has to be. Sanity check: the RMS printed below should
+        # land near sqrt(P2S_pred) ~ 0.004. An order of magnitude more means
+        # tangential displacement is contaminating it again.
+        _, nn_j = cKDTree(g_n).query(p_n, k=1)
+        resid = g_n[nn_j] - p_n
         rn = np.einsum('ni,ni->n', resid, normals)
 
         # 1. does a point's error look like its neighbours' errors?
@@ -131,7 +144,8 @@ def main():
     print('\n' + '=' * 70)
     print(f'Residual error structure  ({len(keys)} clouds, {n} points)')
     print('=' * 70)
-    print(f'  normal-direction error, RMS:      {y.std():.6f}')
+    print(f'  normal-direction error, RMS:      {y.std():.6f}'
+          f'   (expect ~0.004; much larger means the target is contaminated)')
     print(f'  spatial autocorrelation:          {ac:+.3f}')
     print(f'  linear probe R^2 (out of sample): {r2:+.4f}')
 
