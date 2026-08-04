@@ -222,14 +222,22 @@ MPI, issuing an all-reduce inside every forward pass. ASDN picks its
 encoder/decoder depth from the data, so ranks execute different numbers of
 blocks and therefore different numbers of collectives, and NCCL deadlocks —
 visible as 100% GPU utilization at idle power draw. Pinning the depth makes the
-graph rank-invariant. A narrower fix would be disabling BN synchronization
-instead, which would preserve adaptive depth.
+graph rank-invariant. The narrower fix — `--no_bn_sync` — disables BN
+synchronization instead, which preserves adaptive depth under `mpirun`.
 
-**ASDN's depth selection is currently inert.** `Classify`/`ScaleNet` is never
-trained (`--classify_ckpt` defaults to `None`) and receives no gradient, because
-ρ is converted to a Python float in `assign_n_layer_based_on_rho`. Making the
-mechanism real means training the classifier first via
-`train_classifier_on_starter.py`.
+**ASDN's depth selection is inert in the current best model.** The classifier
+was trained (`train_classifier_on_starter.py` → `experiments/classify/`,
+backed up in `checkpoints/`), but the 78.99 backbone was trained and is run
+with `--static_depth`, which bypasses it entirely — and a backbone trained at
+a fixed depth has never exercised its shallow exit paths, so flipping adaptive
+depth on at inference without retraining produces garbage for any sample
+routed shallow. Making the mechanism real means: (1) `measure_classifier.py`
+to check the classifier is worth wiring in, (2) retrain the backbone without
+`--static_depth`, passing `--classify_ckpt`, `--no_bn_sync`, and (ideally)
+`--init_ckpt checkpoints/asdn-epoch049.pkl` to warm-start. Note the classifier
+receives no gradient during denoiser training regardless (ρ is converted to a
+Python float in `assign_n_layer_based_on_rho`), so it keeps exactly the
+weights it was given.
 
 **Noise is specified by standard deviation.** `numpy.random.laplace(0, b)` has
 std `b·√2`; passing the target std as the scale produces noise 1.41× too strong.

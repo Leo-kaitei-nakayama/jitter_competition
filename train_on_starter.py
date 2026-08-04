@@ -40,6 +40,24 @@ def main(args):
         model.load(args.init_ckpt)
         if is_master:
             print(f'Loaded init weights from {args.init_ckpt}')
+        if args.classify_ckpt is not None:
+            # model.load() just replaced every submodule's weights with the ones
+            # embedded in init_ckpt -- including the classifier, which in a
+            # checkpoint trained under --static_depth is still random init. The
+            # explicitly requested classifier must win, so re-apply it.
+            model.feature_nets.classify.load(args.classify_ckpt)
+            model.feature_nets.classify.eval()
+            if is_master:
+                print(f'Re-applied classifier weights from {args.classify_ckpt}')
+
+    if args.no_bn_sync:
+        n_bn = 0
+        for m in model.modules():
+            if hasattr(m, 'sync'):
+                m.sync = False
+                n_bn += 1
+        if is_master:
+            print(f'Disabled BatchNorm sync on {n_bn} modules')
     model.train()
     optimizer = jt.optim.Adam(model.feature_nets.parameters(), lr=args.lr)
 
@@ -154,7 +172,19 @@ if __name__ == '__main__':
                              'REQUIRED for multi-GPU: Jittor BatchNorm is SyncBN under '
                              'MPI, so a data-dependent block count makes ranks issue '
                              'different numbers of collectives and NCCL deadlocks. '
-                             'predict_on_starter.py must be given the same value.')
+                             'predict_on_starter.py must be given the same value. '
+                             'To train WITH adaptive depth under MPI, drop this '
+                             'flag and pass --no_bn_sync instead.')
+    parser.add_argument('--no_bn_sync', action='store_true',
+                        help='disable BatchNorm cross-GPU synchronization. This is '
+                             'the other fix for the multi-GPU deadlock: instead of '
+                             'pinning the depth (--static_depth), remove the '
+                             'collectives from the forward pass, so a data-dependent '
+                             'depth cannot desynchronize the ranks. Each rank then '
+                             'normalizes over its own batch_size/n_ranks samples, '
+                             'which is fine at >=8 per rank. Required whenever '
+                             'adaptive depth (a trained --classify_ckpt without '
+                             '--static_depth) is trained under mpirun.')
     parser.add_argument('--save_interval', type=int, default=5)
     parser.add_argument('--classify_ckpt', type=str, default=None,
                         help='Jittor .pkl from train_classifier_on_starter.py '
