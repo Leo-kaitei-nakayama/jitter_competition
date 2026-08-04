@@ -491,7 +491,7 @@ class DenoiseNetCD(nn.Module):
         return patches + refine_head(patches, feat)
 
     def denoise_langevin_dynamics_diffusion(self, patches, L=5, t_start=632, t_norm='T',
-                                             refine_head=None):
+                                             refine_head=None, return_traj=False):
         """
         Diffusion-style iterative denoising for a batch of patches (paper Alg. 2,
         lines 5-13). Caches E(x^τ̂) once (original patch feature) and runs L
@@ -502,8 +502,13 @@ class DenoiseNetCD(nn.Module):
             t_start: τ̂, the starting timestep. patch_based_denoise_diffusion
                 estimates this per cloud; passing it directly gives the paper's
                 non-adaptive "FixedSched" baseline.
+            return_traj: also return, per step, the positions after the step and
+                the per-point score norms that produced it -- for
+                measure_iteration.py. The denoising math is untouched.
         Returns:
             (B, K, 3) denoised patches
+            [if return_traj] (denoised, traj) where traj is a list of L tuples
+                (positions_after_step (B,K,3) np, score_norm (B,K) np)
         """
         tau = int(max(t_start, L))
         # Algorithm 2 line 8: t = Round(l·Δ) for l = L..0, with Δ = τ̂/L.
@@ -511,6 +516,7 @@ class DenoiseNetCD(nn.Module):
 
         x_t = patches
         feat_T = None
+        traj = []
         with jt.no_grad():
             for i in range(L):
                 t, t_next = step_ts[i], step_ts[i + 1]
@@ -527,5 +533,11 @@ class DenoiseNetCD(nn.Module):
                         x_t, feat_T=feat_T, t_frac_val=t_frac_val)
 
                 x_t = x_t + self.schedule.step_coef(t, t_next) * score
+                if return_traj:
+                    norm = jt.sqrt((score ** 2).sum(dim=-1) + 1e-12)
+                    traj.append((x_t.numpy().copy(), norm.numpy().copy()))
 
-        return self.refine_patches(x_t, refine_head)
+        out = self.refine_patches(x_t, refine_head)
+        if return_traj:
+            return out, traj
+        return out
