@@ -15,15 +15,23 @@ Local eval set of 100 shapes built by `make_eval_set.py` (σ ∈ 0.005–0.020,
 matching the competition spec), split 60 for tuning and 40 held out. Scoring is
 the organizers' `evaluate.py`: `0.5 × CD_score + 0.5 × P2S_score`.
 
+All figures below are the 40-shape holdout unless noted.
+
 | configuration | CD | P2S | **final** |
 |---|---|---|---|
 | `asdn-epoch039`, plain ASDN, single pass | 60.19 | 85.33 | **72.76** |
-| single model + diffusion + repulsion | 64.36 | 90.15 | 77.26 |
-| **ensemble + repulsion — holdout, 40 unseen** | **64.58** | **92.06** | **78.32** |
+| two-model ensemble + repulsion | 64.58 | 92.06 | 78.32 |
+| two REFINED models + repulsion | 65.09 | 92.69 | 78.89 |
+| **one refined model + repulsion** | **64.95** | **93.03** | **78.99** |
 
-The holdout scored above the tune set (78.32 vs 77.96), so the tuning
-generalizes. Local scores are only comparable against each other; the eval set
-is not the competition's test set.
+A single refined model beats the two-model ensemble, so ensembling is dropped:
+same score, half the inference, one checkpoint. That follows from what the
+refinement head does -- it removes each model's systematic error, after which
+both sit near the same irreducible floor and their residuals look alike.
+Averaging only pays when errors differ.
+
+Local scores are only comparable against each other; the eval set is not the
+competition's test set.
 
 ### Best known configuration
 
