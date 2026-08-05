@@ -265,6 +265,10 @@ class DenoiseNetCD(nn.Module):
         loss2 = _masked_loss(w2, score2, gt_score2)
 
         loss = loss1 + loss2
+        # exposed for logging: without the split, a weak uniformity term is
+        # indistinguishable from no term at all in the total
+        self.last_score_loss = float(loss.item())
+        self.last_unif_raw = 0.0
         if unif_weight > 0:
             # x + ŝ is where the network is sending each point. Penalising the
             # spread of nearest-neighbour spacing there is a direct penalty on
@@ -273,9 +277,10 @@ class DenoiseNetCD(nn.Module):
             # only: patch-edge points have truncated neighbourhoods and their
             # spacing carries no usable signal.
             M = mask_size if use_mask else N_noisy
-            loss = loss + unif_weight * (
-                self.spacing_uniformity((x_t + score1)[:, :M, :])
-                + self.spacing_uniformity((x_td + score2)[:, :M, :]))
+            unif = (self.spacing_uniformity((x_t + score1)[:, :M, :])
+                    + self.spacing_uniformity((x_td + score2)[:, :M, :]))
+            self.last_unif_raw = float(unif.item())
+            loss = loss + unif_weight * unif
         return loss
 
     # ------------------------------------------------------------------

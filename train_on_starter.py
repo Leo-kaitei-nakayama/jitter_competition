@@ -86,7 +86,7 @@ def main(args):
             if is_master:
                 print(f'epoch {epoch}: lr = {optimizer.lr:.2e}')
         model.train()
-        losses = []
+        losses, score_losses, unif_raws = [], [], []
         loader_iter = tqdm(loader, desc=f'Epoch {epoch}') if is_master else loader
         for batch in loader_iter:
             # bridge collates dict-of-arrays into batched jt.Var
@@ -103,16 +103,25 @@ def main(args):
             )
             optimizer.step(loss)  # Jittor auto all-reduces gradients across GPUs here
             losses.append(loss.item())
+            score_losses.append(model.last_score_loss)
+            unif_raws.append(model.last_unif_raw)
             if is_master:
-                loader_iter.set_description(f'Epoch {epoch}, loss {np.mean(losses):.6f}')
+                desc = f'Epoch {epoch}, loss {np.mean(losses):.6f}'
+                if args.uniformity_weight > 0:
+                    # what the uniformity term is actually worth: its share of the
+                    # total, and the raw spacing variance it is driving down
+                    share = args.uniformity_weight * np.mean(unif_raws) / max(np.mean(losses), 1e-12)
+                    desc += f' (unif {np.mean(unif_raws):.4f}, {100*share:.1f}% of loss)'
+                loader_iter.set_description(desc)
             
         if is_master:
             log_path = os.path.join(args.save_dir, 'train_log.csv')
             write_header = not os.path.exists(log_path)
             with open(log_path, 'a') as f:
                 if write_header:
-                    f.write('epoch,loss\n')
-                f.write(f'{epoch},{np.mean(losses):.6f}\n')
+                    f.write('epoch,loss,score_loss,unif_raw\n')
+                f.write(f'{epoch},{np.mean(losses):.6f},'
+                        f'{np.mean(score_losses):.6f},{np.mean(unif_raws):.6f}\n')
 
         if is_master and ((epoch + 1) % args.save_interval == 0 or epoch == args.epochs - 1):
             ckpt = os.path.join(args.save_dir, f'asdn-epoch{epoch:03d}.pkl')
