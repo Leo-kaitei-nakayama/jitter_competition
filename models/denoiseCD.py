@@ -106,7 +106,7 @@ class DenoiseNetCD(nn.Module):
 
     def get_supervised_loss(self, pcl_noisy, pcl_clean, pcl_seeds, pcl_std, lam=0.99,
                              mask_size=256, t_min=30, t_norm='T', exact_score=False,
-                             unif_weight=0.0):
+                             unif_weight=0.0, cov_weight=0.0):
         """
         Two-stage sampling loss (paper Algorithm 1, Eq. 9).
             Stage 1: predict score at x^t, loss vs GT score S(x^t)
@@ -163,6 +163,17 @@ class DenoiseNetCD(nn.Module):
                 data) while this one is a relative variance (~1e-1), so start
                 around 1e-5..1e-3 and sweep. 0 reproduces the original loss
                 exactly.
+            cov_weight: weight of CD's SECOND term, applied at x + ŝ. The score
+                loss above already IS CD's first term (pull each sent point to
+                its nearest clean point); what it misses is the reverse demand
+                that every clean point have a sent point nearby -- the coverage
+                signal that punishes collapse directly, where the uniformity
+                term is only a proxy for it. Measured over the central
+                mask_size clean rows (rows are seed-distance sorted), against
+                ALL sent points, so patch-edge truncation cannot fake holes.
+                Scale note: this term has the same units as a squared distance
+                and floors near (half point spacing)^2 ~ 6e-6 even for perfect
+                coverage, so it needs a LARGE weight to matter: sweep 3..30.
         """
         B, N_noisy, N_clean = pcl_noisy.shape[0], pcl_noisy.shape[1], pcl_clean.shape[1]
         if exact_score and N_noisy != N_clean:
@@ -281,6 +292,24 @@ class DenoiseNetCD(nn.Module):
                     + self.spacing_uniformity((x_td + score2)[:, :M, :]))
             self.last_unif_raw = float(unif.item())
             loss = loss + unif_weight * unif
+
+        self.last_cov_raw = 0.0
+        if cov_weight > 0:
+            M = mask_size if use_mask else N_noisy
+            clean_c = pcl_clean[:, :M, :]
+            bidx = jt.arange(B).reshape(B, 1).repeat(1, M)
+
+            def _coverage(sent):
+                # nearest SENT point for each central clean point; indices are
+                # constants, the distance is recomputed so the gradient pulls
+                # that sent point toward the uncovered clean point
+                _, idx, _ = knn_points(clean_c, sent, K=1)
+                nearest = sent[bidx, idx[:, :, 0]]
+                return ((clean_c - nearest) ** 2).sum(dim=-1).mean()
+
+            cov = _coverage(x_t + score1) + _coverage(x_td + score2)
+            self.last_cov_raw = float(cov.item())
+            loss = loss + cov_weight * cov
         return loss
 
     # ------------------------------------------------------------------

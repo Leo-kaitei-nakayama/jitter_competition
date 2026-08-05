@@ -86,7 +86,7 @@ def main(args):
             if is_master:
                 print(f'epoch {epoch}: lr = {optimizer.lr:.2e}')
         model.train()
-        losses, score_losses, unif_raws = [], [], []
+        losses, score_losses, unif_raws, cov_raws = [], [], [], []
         loader_iter = tqdm(loader, desc=f'Epoch {epoch}') if is_master else loader
         for batch in loader_iter:
             # bridge collates dict-of-arrays into batched jt.Var
@@ -100,11 +100,13 @@ def main(args):
                 t_norm=args.t_norm,
                 exact_score=args.exact_score,
                 unif_weight=args.uniformity_weight,
+                cov_weight=args.coverage_weight,
             )
             optimizer.step(loss)  # Jittor auto all-reduces gradients across GPUs here
             losses.append(loss.item())
             score_losses.append(model.last_score_loss)
             unif_raws.append(model.last_unif_raw)
+            cov_raws.append(model.last_cov_raw)
             if is_master:
                 desc = f'Epoch {epoch}, loss {np.mean(losses):.6f}'
                 if args.uniformity_weight > 0:
@@ -112,6 +114,9 @@ def main(args):
                     # total, and the raw spacing variance it is driving down
                     share = args.uniformity_weight * np.mean(unif_raws) / max(np.mean(losses), 1e-12)
                     desc += f' (unif {np.mean(unif_raws):.4f}, {100*share:.1f}% of loss)'
+                if args.coverage_weight > 0:
+                    share = args.coverage_weight * np.mean(cov_raws) / max(np.mean(losses), 1e-12)
+                    desc += f' (cov {np.mean(cov_raws):.2e}, {100*share:.1f}% of loss)'
                 loader_iter.set_description(desc)
             
         if is_master:
@@ -119,9 +124,10 @@ def main(args):
             write_header = not os.path.exists(log_path)
             with open(log_path, 'a') as f:
                 if write_header:
-                    f.write('epoch,loss,score_loss,unif_raw\n')
+                    f.write('epoch,loss,score_loss,unif_raw,cov_raw\n')
                 f.write(f'{epoch},{np.mean(losses):.6f},'
-                        f'{np.mean(score_losses):.6f},{np.mean(unif_raws):.6f}\n')
+                        f'{np.mean(score_losses):.6f},{np.mean(unif_raws):.6f},'
+                        f'{np.mean(cov_raws):.8f}\n')
 
         if is_master and ((epoch + 1) % args.save_interval == 0 or epoch == args.epochs - 1):
             ckpt = os.path.join(args.save_dir, f'asdn-epoch{epoch:03d}.pkl')
@@ -193,6 +199,13 @@ if __name__ == '__main__':
                              'backbone, where the scramble originates, instead of '
                              'only in the downstream refine head. Sweep 1e-5..1e-3; '
                              '0 reproduces the original loss exactly.')
+    parser.add_argument('--coverage_weight', type=float, default=0.0,
+                        help="weight of CD's second (coverage) term at x + score_hat: "
+                             'every central clean point must have a sent point nearby. '
+                             'The score loss already is CD\'s first term, so this '
+                             'completes the metric inside the training loss. Same units '
+                             'as a squared distance with a ~6e-6 floor, so it needs a '
+                             'large weight: sweep 3..30. 0 disables.')
     parser.add_argument('--exact_score', action='store_true',
                         help='train against the exact per-point displacement '
                              '(pcl_clean - pcl) instead of Eq. 14\'s nearest-neighbour '
