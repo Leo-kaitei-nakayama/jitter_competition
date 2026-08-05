@@ -76,6 +76,15 @@ def main(args):
     )
 
     for epoch in range(args.epochs):
+        if args.lr_min is not None:
+            # cosine decay from --lr to --lr_min across the run. The epoch-60
+            # loss curve wobbles in a 0.00088-0.00096 band under constant lr,
+            # which is the signature of being step-size-limited, not converged.
+            import math as _math
+            optimizer.lr = args.lr_min + 0.5 * (args.lr - args.lr_min) * (
+                1 + _math.cos(_math.pi * epoch / max(1, args.epochs - 1)))
+            if is_master:
+                print(f'epoch {epoch}: lr = {optimizer.lr:.2e}')
         model.train()
         losses = []
         loader_iter = tqdm(loader, desc=f'Epoch {epoch}') if is_master else loader
@@ -133,6 +142,10 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--lr', type=float, default=5e-4)
+    parser.add_argument('--lr_min', type=float, default=None,
+                        help='enable cosine lr decay from --lr down to this value '
+                             'over --epochs. Recommended for continuing from a '
+                             'checkpoint that plateaued under constant lr.')
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--use_fusion', action='store_true',
                         help='use the new FusionHead (Feature/Gradient Fusion) output head')

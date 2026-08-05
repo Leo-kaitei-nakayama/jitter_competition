@@ -101,6 +101,8 @@ def main(args):
                     refine_head=refine_head,
                     stop_frac=args.stop_frac,
                     straight=args.straight,
+                    stitch=args.stitch,
+                    stitch_alpha=args.stitch_alpha,
                 )
                 taus.append((rel, tau))
             else:
@@ -194,6 +196,15 @@ if __name__ == '__main__':
     parser.add_argument('--max_sigma', type=float, default=None,
                         help='must match training -- the timestep-to-sigma mapping is '
                              'what t_frac means to the network')
+    parser.add_argument('--stitch', type=str, default='best', choices=['best', 'mean'],
+                        help="how overlapping patch predictions are combined. 'best' "
+                             'is the original winner-take-all; \'mean\' averages every '
+                             'covering patch, using the ~6x patch overlap as a free '
+                             'ensemble against patch-placement noise.')
+    parser.add_argument('--stitch_alpha', type=float, default=1.0,
+                        help='weight sharpness for --stitch mean: exp(-alpha * '
+                             'normalized seed distance). 1.0 mirrors the argmax '
+                             'weights; try 3-5 to trust patch centers more.')
     parser.add_argument('--stop_frac', type=float, default=0.0,
                         help='per-point early stopping: from the 2nd diffusion step '
                              'on, freeze points whose score norm fell below this '

@@ -330,7 +330,8 @@ class DenoiseNetCD(nn.Module):
                                        adaptive=True, sigma_scale=1.0,
                                        sigma_estimator='var', t_norm='T',
                                        return_tau=False, refine_head=None,
-                                       stop_frac=0.0, straight=False):
+                                       stop_frac=0.0, straight=False,
+                                       stitch='best', stitch_alpha=1.0):
         """
         Adaptive and Iterative Denoising (paper Algorithm 2).
 
@@ -399,7 +400,25 @@ class DenoiseNetCD(nn.Module):
                 refine_head=refine_head, stop_frac=stop_frac, straight=straight))
         patches_denoised = jt.concat(patches_denoised, dim=0)
         patches_denoised = patches_denoised + seed_pnts_1
-        pcl_denoised = patches_denoised[jt.array(sel_patch_np), jt.array(sel_pos_np)]
+        if stitch == 'mean':
+            # Weighted average over every patch that covers a point, instead of
+            # winner-take-all. Each patch's estimate of a point carries
+            # independent patch-placement noise, so the ~seed_k-fold overlap is
+            # a free ensemble; stitch_alpha sharpens the weights so unreliable
+            # patch-edge predictions count less (alpha=1 mirrors the exp(-d)
+            # weights the argmax used; larger alpha approaches 'best').
+            pd = patches_denoised.numpy().astype(np.float64)      # (P, K, 3)
+            w = np.exp(-stitch_alpha * pdist_np.astype(np.float64))
+            acc = np.zeros((N, 3), np.float64)
+            wsum = np.zeros((N,), np.float64)
+            np.add.at(acc, pid_np.reshape(-1),
+                      pd.reshape(-1, 3) * w.reshape(-1, 1))
+            np.add.at(wsum, pid_np.reshape(-1), w.reshape(-1))
+            covered = wsum > 0
+            pcl_denoised = jt.array(
+                (acc[covered] / wsum[covered, None]).astype(np.float32))
+        else:
+            pcl_denoised = patches_denoised[jt.array(sel_patch_np), jt.array(sel_pos_np)]
         while pcl_denoised.shape[0] != N:
             pcl_denoised = jt.concat(
                 (pcl_denoised, pcl_denoised[pcl_denoised.shape[0] - 1].unsqueeze(0)), dim=0)
