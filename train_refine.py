@@ -42,6 +42,7 @@ from tqdm import tqdm
 
 from models.denoiseCD import DenoiseNetCD
 from models.refine import RefineHead
+from models.classifyNet import get_knn_idx
 from bridge.data_bridge import ShapeNetPatchTrainDataset
 
 jt.flags.use_cuda = 1
@@ -124,6 +125,26 @@ def main(args):
             else:
                 loss = err.mean()
 
+            if args.uniformity_weight > 0:
+                # GPCD++-style objective: besides landing near the surface, the
+                # corrected points should be evenly spaced. Penalize the relative
+                # variance of nearest-neighbour spacing over the corrected patch.
+                # Queries come from the central mask only (KNN columns are
+                # seed-distance ordered), so the patch edge's natural density
+                # falloff does not pollute the signal; neighbours come from the
+                # whole patch. The gradient reaches the head through the
+                # positions; the neighbour indices are treated as constant.
+                xr = den + corr                              # (B, N, 3)
+                M = args.mask_size if use_mask else N
+                xm = xr[:, :M, :]
+                idx = get_knn_idx(xr, xm, k=1, offset=1).reshape(B, M)
+                bidx = jt.arange(B).reshape(B, 1).repeat(1, M)
+                nb = xr[bidx, idx]                           # (B, M, 3)
+                d1 = jt.sqrt(((nb - xm) ** 2).sum(dim=-1) + 1e-12)
+                dm = d1.mean(dim=1, keepdims=True)
+                unif = (((d1 - dm) / (dm + 1e-12)) ** 2).mean()
+                loss = loss + args.uniformity_weight * unif
+
             optimizer.step(loss)
             losses.append(loss.item())
             if is_master:
@@ -163,6 +184,12 @@ if __name__ == '__main__':
     p.add_argument('--lr', type=float, default=1e-3)
     p.add_argument('--epochs', type=int, default=20)
     p.add_argument('--mask_size', type=int, default=256)
+    p.add_argument('--uniformity_weight', type=float, default=0.0,
+                   help='weight of the nearest-neighbour-spacing uniformity term '
+                        '(GPCD++-style). 0 keeps the original loss exactly. The '
+                        'surface term is a squared distance (~1e-5 scale) while '
+                        'this term is a relative variance (~1e-1 scale), so start '
+                        'small: sweep 1e-5 .. 1e-3 against the tune split.')
     p.add_argument('--save_interval', type=int, default=2)
     p.add_argument('--save_dir', type=str, default='experiments/refine')
     p.add_argument('--seed', type=int, default=2024)

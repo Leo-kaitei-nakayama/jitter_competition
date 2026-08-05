@@ -329,7 +329,8 @@ class DenoiseNetCD(nn.Module):
                                        seed_k_alpha=10, L=5, t_start=632,
                                        adaptive=True, sigma_scale=1.0,
                                        sigma_estimator='var', t_norm='T',
-                                       return_tau=False, refine_head=None):
+                                       return_tau=False, refine_head=None,
+                                       stop_frac=0.0, straight=False):
         """
         Adaptive and Iterative Denoising (paper Algorithm 2).
 
@@ -395,7 +396,7 @@ class DenoiseNetCD(nn.Module):
         for s in chunk_starts:
             patches_denoised.append(self.denoise_langevin_dynamics_diffusion(
                 patches[s:s + patch_step], L=L, t_start=tau, t_norm=t_norm,
-                refine_head=refine_head))
+                refine_head=refine_head, stop_frac=stop_frac, straight=straight))
         patches_denoised = jt.concat(patches_denoised, dim=0)
         patches_denoised = patches_denoised + seed_pnts_1
         pcl_denoised = patches_denoised[jt.array(sel_patch_np), jt.array(sel_pos_np)]
@@ -491,7 +492,8 @@ class DenoiseNetCD(nn.Module):
         return patches + refine_head(patches, feat)
 
     def denoise_langevin_dynamics_diffusion(self, patches, L=5, t_start=632, t_norm='T',
-                                             refine_head=None, return_traj=False):
+                                             refine_head=None, return_traj=False,
+                                             stop_frac=0.0, straight=False):
         """
         Diffusion-style iterative denoising for a batch of patches (paper Alg. 2,
         lines 5-13). Caches E(x^τ̂) once (original patch feature) and runs L
@@ -505,6 +507,17 @@ class DenoiseNetCD(nn.Module):
             return_traj: also return, per step, the positions after the step and
                 the per-point score norms that produced it -- for
                 measure_iteration.py. The denoising math is untouched.
+            stop_frac: per-point early stopping (ASDN's stop-in-advance idea at
+                point granularity, driven by the score instead of the entropy
+                classifier). From step 2 on, a point whose predicted score norm
+                has fallen below stop_frac x (its patch's mean step-1 score
+                norm) is frozen for the remaining steps -- it is already where
+                the model wants it, and further steps only add tangential
+                drift. 0 disables. Sweep against the tune split after
+                measure_iteration.py confirms the overshoot exists.
+            straight: StraightPCF-inspired: restrict steps 2..L to the
+                direction each point moved in step 1, killing the zigzag
+                component of the trajectory. Off by default.
         Returns:
             (B, K, 3) denoised patches
             [if return_traj] (denoised, traj) where traj is a list of L tuples
@@ -517,6 +530,9 @@ class DenoiseNetCD(nn.Module):
         x_t = patches
         feat_T = None
         traj = []
+        d0_unit = None
+        ref_norm = None
+        frozen = None
         with jt.no_grad():
             for i in range(L):
                 t, t_next = step_ts[i], step_ts[i + 1]
@@ -532,7 +548,28 @@ class DenoiseNetCD(nn.Module):
                     score, _ = self._patch_forward(
                         x_t, feat_T=feat_T, t_frac_val=t_frac_val)
 
-                x_t = x_t + self.schedule.step_coef(t, t_next) * score
+                step = self.schedule.step_coef(t, t_next) * score
+
+                if (stop_frac > 0 or straight) and i == 0:
+                    norm0 = jt.sqrt((score ** 2).sum(dim=-1) + 1e-12)   # (B, K)
+                    if stop_frac > 0:
+                        ref_norm = norm0.mean(dim=1, keepdims=True)      # (B, 1)
+                        frozen = jt.zeros_like(norm0)
+                    if straight:
+                        d0_unit = step / jt.sqrt(
+                            (step ** 2).sum(dim=-1, keepdims=True) + 1e-24)
+
+                if i > 0:
+                    if straight:
+                        along = (step * d0_unit).sum(dim=-1, keepdims=True)
+                        step = along * d0_unit
+                    if stop_frac > 0:
+                        norm_i = jt.sqrt((score ** 2).sum(dim=-1) + 1e-12)
+                        frozen = jt.maximum(
+                            frozen, (norm_i < stop_frac * ref_norm).float32())
+                        step = step * (1.0 - frozen).unsqueeze(-1)
+
+                x_t = x_t + step
                 if return_traj:
                     norm = jt.sqrt((score ** 2).sum(dim=-1) + 1e-12)
                     traj.append((x_t.numpy().copy(), norm.numpy().copy()))

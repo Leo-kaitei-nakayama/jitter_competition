@@ -99,6 +99,8 @@ def main(args):
                     t_norm=args.t_norm,
                     return_tau=True,
                     refine_head=refine_head,
+                    stop_frac=args.stop_frac,
+                    straight=args.straight,
                 )
                 taus.append((rel, tau))
             else:
@@ -192,6 +194,16 @@ if __name__ == '__main__':
     parser.add_argument('--max_sigma', type=float, default=None,
                         help='must match training -- the timestep-to-sigma mapping is '
                              'what t_frac means to the network')
+    parser.add_argument('--stop_frac', type=float, default=0.0,
+                        help='per-point early stopping: from the 2nd diffusion step '
+                             'on, freeze points whose score norm fell below this '
+                             'fraction of the patch mean at step 1. 0 disables. '
+                             'Run measure_iteration.py first, then sweep on tune '
+                             '(try 0.2-0.6).')
+    parser.add_argument('--straight', action='store_true',
+                        help='restrict later diffusion steps to each point\'s '
+                             'step-1 direction (StraightPCF-style anti-drift). '
+                             'Experimental, off by default.')
     parser.add_argument('--save_tau', type=str, default=None,
                         help='write a CSV of per-cloud (rel, tau, sigma_est) after '
                              'prediction. Feed it to postprocess.py --tau_csv to make '
