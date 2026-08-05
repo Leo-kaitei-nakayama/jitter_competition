@@ -79,6 +79,8 @@ Kept in the repo behind default-off flags so they are not retried blind:
 | a bigger refinement head | same 13%, no gain |
 | ensembling two REFINED models | −0.10 vs one refined model |
 | entropy-ratio adaptive depth (wire the trained classifier) | measured before building (`measure_classifier.py`): on the round-A noise range the supervision target itself barely tracks noise — corr(target, σ) = +0.13 with per-bin means flat at 0.98–1.01 — so even a perfect classifier routes depth ~randomly. Backbone retrain skipped. |
+| per-point early stop (`--stop_frac`) | measurement said the overshoot is real (36% of points worsen at step 3, oracle bound 9.2%, corr(score norm, harm) up to −0.98) yet every threshold lost on real tune data: −0.09 / −0.87 / −2.58 at 0.2 / 0.35 / 0.5. The rule freezes slowly-improving points along with the overshooters (64% still improve at step 3), and the refine head + repulsion downstream were fit to unfrozen outputs. Oracle ≠ reachable policy. |
+| straight-path steps (`--straight`) | best CD of the sweep (+0.21) but double the P2S cost (−0.36): clamping later steps to the step-1 direction also clamps the normal-direction corrections. Net −0.06, no reason to keep. |
 
 Jet projection failing is informative: the model's output is already smoother
 than a local polynomial fit of itself, so any filter that only re-smooths the
