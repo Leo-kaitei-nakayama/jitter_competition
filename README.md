@@ -178,6 +178,30 @@ Inference flags must match training: `--use_fusion`, `--static_depth`,
 | `--fusion_k` | 16 | paper uses 32 |
 | `--fusion_gate` | `pos` | `posfeat` matches the paper; changes parameter shapes |
 
+## Why CD trails P2S, and where the fix belongs
+
+The training target is Eq. 14's `S(x) = NN(x, x_clean) - x`, and **it is not
+injective**: several noisy points can share one nearest clean point, and the
+per-point squared loss is *fully satisfied* when all of them land on it. The
+loss cannot see collapse. CD's second term — `mean_{b∈clean} min_{a∈pred}` —
+punishes exactly that, while P2S only measures point-to-surface and so agrees
+with the loss. Hence 93 vs 65.
+
+Everything downstream (repulsion filter, refine head) tidies up after the
+scramble. `--uniformity_weight` puts the missing signal **in the backbone's own
+loss**, on `x + ŝ` — where the network is sending each point — so the gradient
+reaches the stage that creates the problem:
+
+```bash
+train_on_starter.py ... --uniformity_weight 1e-4    # sweep 1e-5 .. 1e-3
+```
+
+`train_refine.py` has the same flag for the head-only variant. The metric is
+the relative variance of nearest-neighbour spacing (scale-free, zero for an
+even distribution); a check on synthetic clouds gives 0.00 for a regular grid,
+0.36 for random scatter, and 1.00 when half the points are collapsed onto three
+spots — the ordering the term needs.
+
 ## Noise-adaptive repulsion (sim-calibrated, verify on tune before trusting)
 
 A simulation against the organizers' exact CD metric (ideal surface projection

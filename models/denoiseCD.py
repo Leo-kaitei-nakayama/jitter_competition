@@ -4,6 +4,7 @@ import jittor.nn as nn
 
 from .feature import FeatureExtraction
 from .pointops_jt import knn_points, farthest_point_sampling
+from .classifyNet import get_knn_idx
 from .InfoCD import calc_cd_like_InfoV2
 
 
@@ -86,8 +87,26 @@ class DenoiseNetCD(nn.Module):
         score = nn_pts - pcl
         return score
 
+    @staticmethod
+    def spacing_uniformity(pts):
+        """Relative variance of nearest-neighbour spacing over pts (B, M, 3).
+
+        Scale-free (it divides by the mean spacing), so it does not fight the
+        squared-distance score term for control of the overall scale, and it is
+        zero exactly when every point is equidistant from its nearest
+        neighbour. Neighbour indices are treated as constant; the gradient
+        reaches the caller through the positions.
+        """
+        B, M, _ = pts.shape
+        idx = get_knn_idx(pts, pts, k=1, offset=1).reshape(B, M)
+        bidx = jt.arange(B).reshape(B, 1).repeat(1, M)
+        d1 = jt.sqrt(((pts[bidx, idx] - pts) ** 2).sum(dim=-1) + 1e-12)
+        dm = d1.mean(dim=1, keepdims=True)
+        return (((d1 - dm) / (dm + 1e-12)) ** 2).mean()
+
     def get_supervised_loss(self, pcl_noisy, pcl_clean, pcl_seeds, pcl_std, lam=0.99,
-                             mask_size=256, t_min=30, t_norm='T', exact_score=False):
+                             mask_size=256, t_min=30, t_norm='T', exact_score=False,
+                             unif_weight=0.0):
         """
         Two-stage sampling loss (paper Algorithm 1, Eq. 9).
             Stage 1: predict score at x^t, loss vs GT score S(x^t)
@@ -128,6 +147,22 @@ class DenoiseNetCD(nn.Module):
                 clusters them.
                 Training-only; inference is unaffected, so predict_on_starter.py
                 needs no matching flag.
+            unif_weight: weight of a point-spacing uniformity penalty on x + ŝ,
+                i.e. on where the network wants each point to end up.
+
+                The score target NN(x, clean) - x is not injective: several
+                noisy points can share a nearest clean point, and the loss above
+                is fully satisfied when they all land on it. That degeneracy is
+                invisible to a per-point squared error but is exactly what the
+                CD metric's second term punishes, which is why CD trails P2S by
+                ~28 points. This term is the missing signal, applied where the
+                scramble originates rather than in a downstream stage that can
+                only tidy up afterwards.
+
+                Scale note: the score term is a squared distance (~1e-3 for this
+                data) while this one is a relative variance (~1e-1), so start
+                around 1e-5..1e-3 and sweep. 0 reproduces the original loss
+                exactly.
         """
         B, N_noisy, N_clean = pcl_noisy.shape[0], pcl_noisy.shape[1], pcl_clean.shape[1]
         if exact_score and N_noisy != N_clean:
@@ -229,7 +264,19 @@ class DenoiseNetCD(nn.Module):
         gt_score2 = _gt_score(x_td)
         loss2 = _masked_loss(w2, score2, gt_score2)
 
-        return loss1 + loss2
+        loss = loss1 + loss2
+        if unif_weight > 0:
+            # x + ŝ is where the network is sending each point. Penalising the
+            # spread of nearest-neighbour spacing there is a direct penalty on
+            # several points being sent to the same place -- the degeneracy the
+            # per-point score loss cannot see. Measured on the central mask
+            # only: patch-edge points have truncated neighbourhoods and their
+            # spacing carries no usable signal.
+            M = mask_size if use_mask else N_noisy
+            loss = loss + unif_weight * (
+                self.spacing_uniformity((x_t + score1)[:, :M, :])
+                + self.spacing_uniformity((x_td + score2)[:, :M, :]))
+        return loss
 
     # ------------------------------------------------------------------
     # Inference

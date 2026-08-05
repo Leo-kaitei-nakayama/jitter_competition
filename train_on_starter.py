@@ -99,6 +99,7 @@ def main(args):
                 t_min=args.t_min,
                 t_norm=args.t_norm,
                 exact_score=args.exact_score,
+                unif_weight=args.uniformity_weight,
             )
             optimizer.step(loss)  # Jittor auto all-reduces gradients across GPUs here
             losses.append(loss.item())
@@ -173,6 +174,16 @@ if __name__ == '__main__':
                              "'pos' is the older position-only variant.")
     parser.add_argument('--fusion_include_self', action='store_true',
                         help='let each point be its own gradient-prediction neighbour')
+    parser.add_argument('--uniformity_weight', type=float, default=0.0,
+                        help='penalise uneven point spacing at x + score_hat, i.e. '
+                             'where the network sends each point. The score target '
+                             'NN(x, clean) - x is not injective, so the per-point '
+                             'loss is fully satisfied when several points collapse '
+                             'onto one clean point -- invisible to the loss, '
+                             'punished by CD. This puts the missing signal in the '
+                             'backbone, where the scramble originates, instead of '
+                             'only in the downstream refine head. Sweep 1e-5..1e-3; '
+                             '0 reproduces the original loss exactly.')
     parser.add_argument('--exact_score', action='store_true',
                         help='train against the exact per-point displacement '
                              '(pcl_clean - pcl) instead of Eq. 14\'s nearest-neighbour '
