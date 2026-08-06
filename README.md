@@ -178,6 +178,37 @@ Inference flags must match training: `--use_fusion`, `--static_depth`,
 | `--fusion_k` | 16 | paper uses 32 |
 | `--fusion_gate` | `pos` | `posfeat` matches the paper; changes parameter shapes |
 
+## Distribution terms in the loss: three attempts, measured
+
+All three add a distribution signal the score loss cannot see. Compared bare
+(no refine head, fixed 0.3/2 filter) on 20 tune clouds, against the original
+λ=0 backbone measured identically — **CD 66.39 / P2S 89.94 / final 78.18**.
+
+| term | training behaviour | bare tune result |
+|---|---|---|
+| `--uniformity_weight 1e-3` | spacing variance 0.45 → 0.11 | CD 66.96 (**+0.57**) / P2S 88.17 (**−1.77**) / 77.58 |
+| `--uniformity_weight 1e-4` | variance *rose* to 0.55 (5.8% of loss, too weak) | not evaluated |
+| `--coverage_weight 10/30` | coverage AND score loss both fall | in progress |
+
+**Uniformity is rejected.** It does raise CD — the hypothesis that a
+distribution term in the loss improves CD is confirmed — but it pays 3.1 P2S
+points per CD point, a worse exchange rate than the hand-written repulsion
+filter's 1:1. The term is satisfiable by moving points off the surface, so
+that is what the optimizer does.
+
+Coverage has no such escape: the only way to put a predicted point near a
+clean point is to put it *at* the clean point, which is surface accuracy. Its
+training curves reflect that — at epoch 11, coverage 1.69e-4 → 1.04e-4 while
+the score loss also fell below the λ=0 run's value at the same epoch.
+
+**Changing the loss changes the score scale, so `--sigma_scale` must be
+re-swept.** The coverage backbone emits displacements ~1.8× larger, so the
+Eq. 15 estimator reads the same cloud as far noisier: mean τ̂ went 538 → 945
+with clouds pinned at the schedule top. Scored at the old σ=1.5 it looks
+catastrophic (final 64.6) purely from over-denoising. This is the same trap as
+the epoch-059 comparison: **a new backbone is not comparable until its σ is
+recalibrated.**
+
 ## Why CD trails P2S, and where the fix belongs
 
 The training target is Eq. 14's `S(x) = NN(x, x_clean) - x`, and **it is not
