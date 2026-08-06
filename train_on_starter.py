@@ -73,6 +73,7 @@ def main(args):
         num_workers=args.num_workers,
         noise_dist=args.noise_dist,
         mesh_name=args.mesh_name,
+        with_normals=(args.tangent_weight > 0),
     )
 
     for epoch in range(args.epochs):
@@ -86,7 +87,7 @@ def main(args):
             if is_master:
                 print(f'epoch {epoch}: lr = {optimizer.lr:.2e}')
         model.train()
-        losses, score_losses, unif_raws, cov_raws = [], [], [], []
+        losses, score_losses, unif_raws, cov_raws, tang_raws = [], [], [], [], []
         loader_iter = tqdm(loader, desc=f'Epoch {epoch}') if is_master else loader
         for batch in loader_iter:
             # bridge collates dict-of-arrays into batched jt.Var
@@ -101,12 +102,15 @@ def main(args):
                 exact_score=args.exact_score,
                 unif_weight=args.uniformity_weight,
                 cov_weight=args.coverage_weight,
+                tang_weight=args.tangent_weight,
+                pcl_normals=batch.get('pcl_normals'),
             )
             optimizer.step(loss)  # Jittor auto all-reduces gradients across GPUs here
             losses.append(loss.item())
             score_losses.append(model.last_score_loss)
             unif_raws.append(model.last_unif_raw)
             cov_raws.append(model.last_cov_raw)
+            tang_raws.append(model.last_tang_raw)
             if is_master:
                 desc = f'Epoch {epoch}, loss {np.mean(losses):.6f}'
                 if args.uniformity_weight > 0:
@@ -117,6 +121,9 @@ def main(args):
                 if args.coverage_weight > 0:
                     share = args.coverage_weight * np.mean(cov_raws) / max(np.mean(losses), 1e-12)
                     desc += f' (cov {np.mean(cov_raws):.2e}, {100*share:.1f}% of loss)'
+                if args.tangent_weight > 0:
+                    share = args.tangent_weight * np.mean(tang_raws) / max(np.mean(losses), 1e-12)
+                    desc += f' (tang {np.mean(tang_raws):.2e}, {100*share:.1f}% of loss)'
                 loader_iter.set_description(desc)
             
         if is_master:
@@ -124,10 +131,10 @@ def main(args):
             write_header = not os.path.exists(log_path)
             with open(log_path, 'a') as f:
                 if write_header:
-                    f.write('epoch,loss,score_loss,unif_raw,cov_raw\n')
+                    f.write('epoch,loss,score_loss,unif_raw,cov_raw,tang_raw\n')
                 f.write(f'{epoch},{np.mean(losses):.6f},'
                         f'{np.mean(score_losses):.6f},{np.mean(unif_raws):.6f},'
-                        f'{np.mean(cov_raws):.8f}\n')
+                        f'{np.mean(cov_raws):.8f},{np.mean(tang_raws):.8f}\n')
 
         if is_master and ((epoch + 1) % args.save_interval == 0 or epoch == args.epochs - 1):
             ckpt = os.path.join(args.save_dir, f'asdn-epoch{epoch:03d}.pkl')
@@ -199,6 +206,15 @@ if __name__ == '__main__':
                              'backbone, where the scramble originates, instead of '
                              'only in the downstream refine head. Sweep 1e-5..1e-3; '
                              '0 reproduces the original loss exactly.')
+    parser.add_argument('--tangent_weight', type=float, default=0.0,
+                        help='penalise the TANGENTIAL component of the predicted '
+                             'displacement (E_disp from Xu/Yang/Deng 2024): '
+                             '||n x score||^2 with n the true face normal at the '
+                             'clean point the score aims at. Unlike the uniformity '
+                             'penalty, a cross product leaves normal-direction motion '
+                             'completely free, so it cannot buy distribution by paying '
+                             'P2S. Loads exact mesh normals automatically. Sweep '
+                             '0.1..3; 0 disables.')
     parser.add_argument('--coverage_weight', type=float, default=0.0,
                         help="weight of CD's second (coverage) term at x + score_hat: "
                              'every central clean point must have a sent point nearby. '

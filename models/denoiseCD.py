@@ -82,9 +82,13 @@ class DenoiseNetCD(nn.Module):
         Returns:
             score: (B, N, 3)  NN(pcl, pcl_clean) - pcl
         """
-        _, _, nn_pts = knn_points(pcl, pcl_clean, K=1, return_nn=True)
+        _, idx, nn_pts = knn_points(pcl, pcl_clean, K=1, return_nn=True)
         nn_pts = nn_pts.squeeze(2)
         score = nn_pts - pcl
+        # kept for the tangential penalty, which needs the normal at that same
+        # clean point; stored rather than returned so every existing caller is
+        # untouched
+        self.last_nn_idx = idx[:, :, 0]
         return score
 
     @staticmethod
@@ -106,7 +110,8 @@ class DenoiseNetCD(nn.Module):
 
     def get_supervised_loss(self, pcl_noisy, pcl_clean, pcl_seeds, pcl_std, lam=0.99,
                              mask_size=256, t_min=30, t_norm='T', exact_score=False,
-                             unif_weight=0.0, cov_weight=0.0):
+                             unif_weight=0.0, cov_weight=0.0,
+                             tang_weight=0.0, pcl_normals=None):
         """
         Two-stage sampling loss (paper Algorithm 1, Eq. 9).
             Stage 1: predict score at x^t, loss vs GT score S(x^t)
@@ -174,6 +179,26 @@ class DenoiseNetCD(nn.Module):
                 Scale note: this term has the same units as a squared distance
                 and floors near (half point spacing)^2 ~ 6e-6 even for perfect
                 coverage, so it needs a LARGE weight to matter: sweep 3..30.
+            tang_weight, pcl_normals: penalise the TANGENTIAL component of the
+                predicted displacement -- E_disp from Xu/Yang/Deng, "Point cloud
+                denoising using a generalized error metric" (Graphical Models
+                2024), as ||n x ŝ||^2 with n the true surface normal at the
+                clean point ŝ points to.
+
+                Why this rather than another spacing penalty: the uniformity
+                term buys distribution by paying P2S (measured: P2S 88.2 for a
+                uniformity-trained backbone against ~91 for the original), the
+                same 1:1 trade the hand-written repulsion filter hit. A cross
+                product cannot make that trade -- it leaves motion along the
+                normal completely free and only forbids sliding along the
+                surface, which is the drift the CD simulation identified
+                (kappa ~ 2 sigma) as the recoverable part of the gap.
+
+                pcl_normals is (B, M, 3) for the CLEAN patch, from
+                ShapeNetPatchTrainDataset(with_normals=True). They are exact
+                face normals, not estimates, so sharp features -- where
+                estimation is least reliable -- carry no extra error.
+                Same units as the score term; sweep 0.1..3.
         """
         B, N_noisy, N_clean = pcl_noisy.shape[0], pcl_noisy.shape[1], pcl_clean.shape[1]
         if exact_score and N_noisy != N_clean:
@@ -253,13 +278,18 @@ class DenoiseNetCD(nn.Module):
 
         def _gt_score(pcl):
             # exact: row-corresponded displacement. approximate: Eq. 14's NN search.
-            return (pcl_clean - pcl) if exact_score else self.compute_gt_score(pcl, pcl_clean)
+            if exact_score:
+                # rows correspond, so point i's normal is row i
+                self.last_nn_idx = jt.arange(pcl.shape[1]).reshape(1, -1).repeat(B, 1)
+                return pcl_clean - pcl
+            return self.compute_gt_score(pcl, pcl_clean)
 
         # ================= Stage 1 =================
         x_t = pcl_noisy
         score1, feat_T = self.feature_nets(
             x_t, feat_empty, offset, feat_T=None, t_frac=t_frac, return_feat=True)
         gt_score1 = _gt_score(x_t)
+        nn_idx1 = self.last_nn_idx
         loss1 = _masked_loss(w1, score1, gt_score1)
 
         # ================= Stage 2 =================
@@ -273,6 +303,7 @@ class DenoiseNetCD(nn.Module):
         score2 = self.feature_nets(
             x_td, feat_empty, offset, feat_T=feat_T, t_frac=t_frac_td, return_feat=False)
         gt_score2 = _gt_score(x_td)
+        nn_idx2 = self.last_nn_idx
         loss2 = _masked_loss(w2, score2, gt_score2)
 
         loss = loss1 + loss2
@@ -310,6 +341,27 @@ class DenoiseNetCD(nn.Module):
             cov = _coverage(x_t + score1) + _coverage(x_td + score2)
             self.last_cov_raw = float(cov.item())
             loss = loss + cov_weight * cov
+
+        self.last_tang_raw = 0.0
+        if tang_weight > 0:
+            if pcl_normals is None:
+                raise ValueError('tang_weight needs pcl_normals; build the loader '
+                                 'with ShapeNetPatchTrainDataset(with_normals=True)')
+            M = mask_size if use_mask else N_noisy
+            bidx = jt.arange(B).reshape(B, 1).repeat(1, M)
+
+            def _tangential(score, nn_idx):
+                # normal at the clean point this displacement is aimed at
+                n = pcl_normals[bidx, nn_idx[:, :M]]                    # (B, M, 3)
+                s = score[:, :M, :]
+                # ||n x s||^2 = |s|^2 - (n.s)^2 for unit n: the part of the
+                # motion that slides along the surface instead of onto it
+                return ((s ** 2).sum(dim=-1)
+                        - ((s * n).sum(dim=-1)) ** 2).clamp(min_v=0.0).mean()
+
+            tang = (_tangential(score1, nn_idx1) + _tangential(score2, nn_idx2))
+            self.last_tang_raw = float(tang.item())
+            loss = loss + tang_weight * tang
         return loss
 
     # ------------------------------------------------------------------
