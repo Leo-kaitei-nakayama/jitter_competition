@@ -188,7 +188,7 @@ All three add a distribution signal the score loss cannot see. Compared bare
 |---|---|---|
 | `--uniformity_weight 1e-3` | spacing variance 0.45 → 0.11 | CD 66.96 (**+0.57**) / P2S 88.17 (**−1.77**) / 77.58 |
 | `--uniformity_weight 1e-4` | variance *rose* to 0.55 (5.8% of loss, too weak) | not evaluated |
-| `--coverage_weight 10/30` | coverage AND score loss both fall | in progress |
+| `--coverage_weight 10` | coverage 1.7e-4 → 1.0e-4, score loss below the λ=0 run | **CD 49.84 / P2S 76.62 / 63.23** at matched epoch 049 |
 
 **Uniformity is rejected.** It does raise CD — the hypothesis that a
 distribution term in the loss improves CD is confirmed — but it pays 3.1 P2S
@@ -196,10 +196,27 @@ points per CD point, a worse exchange rate than the hand-written repulsion
 filter's 1:1. The term is satisfiable by moving points off the surface, so
 that is what the optimizer does.
 
-Coverage has no such escape: the only way to put a predicted point near a
-clean point is to put it *at* the clean point, which is surface accuracy. Its
-training curves reflect that — at epoch 11, coverage 1.69e-4 → 1.04e-4 while
-the score loss also fell below the λ=0 run's value at the same epoch.
+**Coverage is rejected too, and it is the most expensive lesson here.** The
+argument for it was that it has no escape hatch — the only way to put a
+predicted point near a clean point is to put it *at* the clean point, which is
+surface accuracy — and its training curves agreed: coverage 1.69e-4 → 1.04e-4
+with the score loss falling *below* the λ=0 run at the same epoch. At matched
+epoch 049 it scores **CD 49.84 / P2S 76.62 / final 63.23** against the λ=0
+control's 66.39 / 89.94 / 78.18. Sixteen CD points worse, having optimised a
+term that is literally half of CD.
+
+Why: the term is measured over the central `mask_size` rows only, but
+inference runs every point of every patch. Chasing coverage inside the mask
+inflates the displacements — mean τ̂ rose 538 → 945 on the same clouds — and
+that inflated score field is what the whole cloud then gets. A σ sweep does
+not rescue it: 1.5 / 1.0 / 0.7 gave final 64.6 / 66.8 / 67.1, with P2S pinned
+near 78 throughout, so this is not a calibration error.
+
+**The transferable lesson: a training metric improving is not evidence that
+the deployed pipeline improves.** Both rejected terms had textbook training
+curves. Neither survived contact with the eval set. Prefer measurements taken
+through the actual inference path, on held-out clouds, over anything read off
+a loss.
 
 **Changing the loss changes the score scale, so `--sigma_scale` must be
 re-swept.** The coverage backbone emits displacements ~1.8× larger, so the
