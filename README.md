@@ -82,6 +82,7 @@ Kept in the repo behind default-off flags so they are not retried blind:
 | per-point early stop (`--stop_frac`) | measurement said the overshoot is real (36% of points worsen at step 3, oracle bound 9.2%, corr(score norm, harm) up to −0.98) yet every threshold lost on real tune data: −0.09 / −0.87 / −2.58 at 0.2 / 0.35 / 0.5. The rule freezes slowly-improving points along with the overshooters (64% still improve at step 3), and the refine head + repulsion downstream were fit to unfrozen outputs. Oracle ≠ reachable policy. |
 | straight-path steps (`--straight`) | best CD of the sweep (+0.21) but double the P2S cost (−0.36): clamping later steps to the step-1 direction also clamps the normal-direction corrections. Net −0.06, no reason to keep. |
 | weighted-mean stitching (`--stitch mean`) | −3.60 at α=1 (75.10 vs 78.70), CD *and* P2S both down. The ~6x patch overlap is not an independent ensemble: averaging positions across patches is a smoothing operation, and it fails for the same reason jet projection did — the output is already smoother than a local average of itself. CD dropping is the tell: averaging pulls points toward each other, worsening exactly the clumping it was meant to fix. Larger α cannot rescue it either — the weights are exp(−α·d), so α→∞ *is* the winner-take-all default, meaning mean stitching can only approach 78.70 from below. |
+| tangential-displacement penalty (`--tangent_weight`, E_disp of Xu et al. 2024) | CD −1.35 / P2S +1.11 at its own best σ, at both λ=1.0 and λ=0.3 — the trade is the *reverse* of the intent, and λ-insensitive (0.12 CD across a 3.3× weight change). Under isotropic noise ~2/3 of the error is tangential, so the "slide" this term forbids is mostly legitimate correction. Full autopsy in the distribution-terms section. |
 
 Jet projection failing is informative: the model's output is already smoother
 than a local polynomial fit of itself, so any filter that only re-smooths the
@@ -189,6 +190,8 @@ All three add a distribution signal the score loss cannot see. Compared bare
 | `--uniformity_weight 1e-3` | spacing variance 0.45 → 0.11 | CD 66.96 (**+0.57**) / P2S 88.17 (**−1.77**) / 77.58 |
 | `--uniformity_weight 1e-4` | variance *rose* to 0.55 (5.8% of loss, too weak) | not evaluated |
 | `--coverage_weight 10` | coverage 1.7e-4 → 1.0e-4, score loss below the λ=0 run | **CD 49.84 / P2S 76.62 / 63.23** at matched epoch 049 |
+| `--tangent_weight 1.0` | ‖n×s‖² 1.53e-4 → 8.88e-6 over 60 epochs | CD 65.04 (**−1.35**) / P2S 91.05 (**+1.11**) / 78.04 at σ=1.1 |
+| `--tangent_weight 0.3` | same term, 3.3× weaker | CD 64.90 / P2S 90.94 / 77.92 at σ=1.1 |
 
 **Uniformity is rejected.** It does raise CD — the hypothesis that a
 distribution term in the loss improves CD is confirmed — but it pays 3.1 P2S
@@ -212,11 +215,51 @@ that inflated score field is what the whole cloud then gets. A σ sweep does
 not rescue it: 1.5 / 1.0 / 0.7 gave final 64.6 / 66.8 / 67.1, with P2S pinned
 near 78 throughout, so this is not a calibration error.
 
+**The tangential penalty is rejected, and it failed in the most informative
+way: backwards.** `--tangent_weight` adds ‖n×s‖² = |s|² − (n·s)², the part of
+the displacement that slides along the surface instead of onto it, using the
+mesh's *exact* face normal at the clean point each displacement targets
+(`sample_surface` already returns the face index, so this costs one gather and
+is reliable even at sharp edges, where an estimated normal is not). It was
+chosen precisely because it cannot lose the way uniformity lost: pure
+normal-direction motion reads 8.4e-21 against it, so it can never charge for
+moving a point onto the surface. Trained from scratch, 60 epochs, cosine
+1e-3 → 1e-5, at two weights.
+
+It worked as specified and lost anyway. Every setting shows the same trade:
+**CD −1.35, P2S +1.11.** Suppressing tangential motion improved projection and
+degraded distribution — the exact opposite of the intent.
+
+The premise was wrong. The noise is isotropic Laplace in 3D, so **roughly two
+thirds of its energy is tangential**: a noisy point is not only lifted off the
+surface, it is also displaced *along* it. Correcting that lateral error is
+what the score's tangential component is for. P2S cannot see it and CD can, so
+forbidding it buys P2S and sells CD. The paper's E_disp is designed to
+*preserve* an already-good sampling during mesh fitting; under isotropic noise
+the tangential component is not a distribution to protect, it is error to
+remove.
+
+The dose-response settles the attribution without another run: **λ = 1.0 and
+λ = 0.3 differ by 0.12 CD** (65.04 vs 64.90) despite the trained tangential
+residual differing 2.2×. A term whose strength can move 3.3× while the score
+does not move is not the thing steering the result — so a λ=0 from-scratch
+control, ~10 GPU-hours, would not change the decision.
+
+`--sigma_scale` was re-swept, as it must be: the optimum moved 1.5 → **1.1**,
+and the peak is unambiguous (0.8 / 0.9 / 1.0 / 1.1 / 1.2 → 75.42 / 76.90 /
+77.76 / **78.04** / 77.87). The numbers above are best-vs-best.
+
 **The transferable lesson: a training metric improving is not evidence that
-the deployed pipeline improves.** Both rejected terms had textbook training
-curves. Neither survived contact with the eval set. Prefer measurements taken
-through the actual inference path, on held-out clouds, over anything read off
-a loss.
+the deployed pipeline improves.** All three rejected terms had textbook
+training curves. None survived contact with the eval set. Prefer measurements
+taken through the actual inference path, on held-out clouds, over anything
+read off a loss.
+
+**And the second lesson, from three losses in a row: the ceiling is not in the
+regulariser.** Uniformity, coverage and the tangential penalty all add a term
+to the same loss around the same non-injective target, and all three lose. The
+next attempt should change the target or the architecture, not add a fourth
+term.
 
 **Changing the loss changes the score scale, so `--sigma_scale` must be
 re-swept.** The coverage backbone emits displacements ~1.8× larger, so the

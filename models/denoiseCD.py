@@ -87,8 +87,10 @@ class DenoiseNetCD(nn.Module):
         score = nn_pts - pcl
         # kept for the tangential penalty, which needs the normal at that same
         # clean point; stored rather than returned so every existing caller is
-        # untouched
-        self.last_nn_idx = idx[:, :, 0]
+        # untouched. Stored as numpy: a jt.Var attribute on a Module gets swept
+        # into save(), bloating every checkpoint with a (B, N) index buffer and
+        # emitting a spurious "load parameter last_nn_idx failed" on load.
+        self.last_nn_idx = idx[:, :, 0].numpy()
         return score
 
     @staticmethod
@@ -280,7 +282,9 @@ class DenoiseNetCD(nn.Module):
             # exact: row-corresponded displacement. approximate: Eq. 14's NN search.
             if exact_score:
                 # rows correspond, so point i's normal is row i
-                self.last_nn_idx = jt.arange(pcl.shape[1]).reshape(1, -1).repeat(B, 1)
+                # (numpy, not jt.Var: see compute_gt_score)
+                self.last_nn_idx = np.tile(
+                    np.arange(pcl.shape[1], dtype=np.int32)[None], (B, 1))
                 return pcl_clean - pcl
             return self.compute_gt_score(pcl, pcl_clean)
 
@@ -352,7 +356,8 @@ class DenoiseNetCD(nn.Module):
 
             def _tangential(score, nn_idx):
                 # normal at the clean point this displacement is aimed at
-                n = pcl_normals[bidx, nn_idx[:, :M]]                    # (B, M, 3)
+                # (nn_idx arrives as numpy; make the Var conversion explicit)
+                n = pcl_normals[bidx, jt.array(nn_idx[:, :M])]          # (B, M, 3)
                 s = score[:, :M, :]
                 # ||n x s||^2 = |s|^2 - (n.s)^2 for unit n: the part of the
                 # motion that slides along the surface instead of onto it
