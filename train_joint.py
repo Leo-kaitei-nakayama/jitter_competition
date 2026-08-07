@@ -235,17 +235,32 @@ def main(args):
                         f'{np.mean(h_losses) if h_losses else float("nan"):.6f},'
                         f'{np.mean(h_cds) if h_cds else float("nan"):.8f}\n')
 
-        if is_master and ((epoch + 1) % args.save_interval == 0
-                          or epoch == args.epochs - 1):
-            ckpt = os.path.join(args.save_dir, f'asdn-epoch{epoch:03d}.pkl')
-            model.save(ckpt)
-            print(f'Saved {ckpt}')
-            if head_on:
-                # only once it has actually trained: an identity head on disk
-                # invites evaluating it by mistake
-                hck = os.path.join(args.save_dir, f'refine-epoch{epoch:03d}.pkl')
-                head.save(hck)
-                print(f'Saved {hck}')
+        if (epoch + 1) % args.save_interval == 0 or epoch == args.epochs - 1:
+            # EVERY rank must flush its pending graph here, at the same code
+            # point, before rank 0 goes off alone to serialize checkpoints.
+            # Jittor is lazy: the optimizer updates -- including their MPI
+            # gradient all-reduces -- execute whenever a value is first
+            # needed. Without this barrier, rank 0 flushes the HEAD's
+            # collectives inside head.save() while the other ranks, already
+            # in the next epoch's forward, flush the BACKBONE's first: the
+            # collective order diverges across ranks and NCCL deadlocks with
+            # every GPU spinning at 100%. One optimizer never trips this
+            # (train_on_starter.py saves bare); two did, at the first
+            # head-saving epoch. The same barrier also covers the final
+            # epoch, where the other ranks would otherwise exit the process
+            # while rank 0 still owes their collectives an answer.
+            jt.sync_all()
+            if is_master:
+                ckpt = os.path.join(args.save_dir, f'asdn-epoch{epoch:03d}.pkl')
+                model.save(ckpt)
+                print(f'Saved {ckpt}')
+                if head_on:
+                    # only once it has actually trained: an identity head on
+                    # disk invites evaluating it by mistake
+                    hck = os.path.join(args.save_dir,
+                                       f'refine-epoch{epoch:03d}.pkl')
+                    head.save(hck)
+                    print(f'Saved {hck}')
 
 
 if __name__ == '__main__':
