@@ -148,6 +148,45 @@ mpirun -np 6 python -u train_on_starter.py \
 divisible by the rank count. `--static_depth` is **required** for multi-GPU —
 see the notes below. Scale `--lr` roughly with √(ranks).
 
+### Joint training: both stages in one command (`train_joint.py`)
+
+The production pipeline is a relay — `train_on_starter.py`, freeze, then
+`train_refine.py` on the frozen checkpoint. Round B swaps the dataset under a
+"same algorithm" rule, so the retrain path has to be one command on one
+datalist. `train_joint.py` is that command:
+
+```bash
+mpirun -np 4 python -u train_joint.py \
+    --data_root ./dataset_train --datalist ./datalist/train.txt \
+    --use_fusion --static_depth \
+    --lr 1e-3 --lr_min 1e-5 --epochs 60 --batch_size 48 \
+    --num_workers 2 --save_interval 5 --save_dir experiments/joint
+```
+
+Each step runs the exact `train_on_starter.py` backbone update; from
+`--head_start_epoch` (default 20) it additionally rolls the *current* backbone
+through the real inference path (L diffusion steps, eval mode, no grad) and
+trains the RefineHead on the result, exactly as `train_refine.py` would
+against a frozen one. Two properties make this a tool rather than an
+experiment: the head's inputs are produced under `no_grad`, so **the backbone's
+training trajectory is untouched by the head's existence**, and the head is
+zero-initialised, so an untrained head is the identity. It writes the same two
+checkpoint files the relay produced (`asdn-epochXXX.pkl`,
+`refine-epochXXX.pkl`), consumed unchanged by `predict_on_starter.py`.
+Rollout epochs cost roughly 2× a backbone-only epoch; earlier epochs cost 1×.
+
+The rejected loss-term flags stay in `train_on_starter.py` only. The one new
+lever is `--head_cd_weight` (default 0 = production head loss): a symmetric CD
+loss over the refined central region against the central clean points. The
+rationale for placing it *there* and nowhere else: the score target is not
+injective, three backbone-side regularisers failed to fix that (see the
+distribution-terms section), and the head is the one module with a
+neighbourhood receptive field whose training path is identical to its
+inference path — plus its gradient cannot reach the backbone, so the failure
+mode is capped at "the head is bad", not "the backbone is poisoned". Untested;
+sweep against tune20 before trusting it, and re-sweep `--sigma_scale` as
+always.
+
 ## Predict
 
 ```bash
