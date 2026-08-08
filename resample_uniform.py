@@ -54,6 +54,27 @@ def voxel_dedup(pts, cell):
     return pts[np.sort(keep)]
 
 
+def fps_select(cands, n_out, start):
+    """Farthest point sampling: greedily pick the candidate farthest from
+    everything picked so far. Unlike independent weighted draws, this
+    ENFORCES spacing -- no two selected points can be close, because a close
+    point is by construction never the farthest one. That is the blue-noise
+    property the weighted sampler lacked (it collapsed p5 spacing 4x by
+    letting neighbours win together)."""
+    N = cands.shape[0]
+    dmin = np.full(N, np.inf)
+    sel = np.empty(n_out, dtype=np.int64)
+    cur = int(start)
+    for i in range(n_out):
+        sel[i] = cur
+        diff = cands - cands[cur]
+        d = np.einsum('ij,ij->i', diff, diff)
+        np.minimum(dmin, d, out=dmin)
+        dmin[cur] = -1.0          # never re-pick
+        cur = int(np.argmax(dmin))
+    return sel
+
+
 def main(args):
     roots = args.pred_roots
     keysets = [set(find_keys(r, args.pred_filename)) for r in roots]
@@ -78,16 +99,30 @@ def main(args):
             raise SystemExit(f'{key}: dedup left {cands.shape[0]} < {n_out} '
                              f'candidates; lower --dedup_frac')
 
-        # sparse regions get big weights: kNN distance ^ power. power=2
-        # matches the surface's intrinsic dimension -- weight ~ the area a
-        # candidate "owns", which is what uniform coverage equalises.
         dk = cKDTree(cands).query(cands, k=args.k + 1)[0][:, -1]
-        w = np.maximum(dk, 1e-12) ** args.power
 
-        # Gumbel-top-N == sampling n_out WITHOUT replacement with prob ~ w
-        g = rng.gumbel(size=cands.shape[0])
-        idx = np.argpartition(-(np.log(w) + g), n_out - 1)[:n_out]
-        out = cands[idx].astype(np.float32)
+        if args.method == 'fps':
+            # Outlier guard FIRST: FPS pursues the farthest point, which is
+            # precisely an off-surface straggler if any survive. Drop
+            # candidates whose neighbourhood is abnormally empty.
+            keep = dk <= args.outlier_mult * np.median(dk)
+            trimmed = cands[keep]
+            if trimmed.shape[0] < n_out:
+                trimmed = cands          # trim too aggressive; fall back
+            # start from the DENSEST candidate: a guaranteed-inlier anchor
+            start = int(np.argmin(dk[keep] if trimmed is not cands else dk))
+            idx = fps_select(trimmed, n_out, start)
+            out = trimmed[idx].astype(np.float32)
+        else:
+            # sparse regions get big weights: kNN distance ^ power. power=2
+            # matches the surface's intrinsic dimension -- weight ~ the area
+            # a candidate "owns", which uniform coverage equalises. Kept for
+            # the record: measured CD 61.69 vs FPS's motivation -- static
+            # weights cannot stop neighbours from winning together.
+            w = np.maximum(dk, 1e-12) ** args.power
+            g = rng.gumbel(size=cands.shape[0])
+            idx = np.argpartition(-(np.log(w) + g), n_out - 1)[:n_out]
+            out = cands[idx].astype(np.float32)
 
         out_path = os.path.join(args.out_root, key)
         os.makedirs(out_path, exist_ok=True)
@@ -115,9 +150,15 @@ if __name__ == '__main__':
     p.add_argument('--k', type=int, default=12,
                    help='which NN distance defines local sparsity; must '
                         'exceed the near-twin count (~len(pred_roots))')
+    p.add_argument('--method', choices=['fps', 'weighted'], default='fps',
+                   help='fps = farthest point sampling (blue noise, enforced '
+                        'spacing); weighted = the measured-and-rejected '
+                        'independent sampler, kept for comparison')
+    p.add_argument('--outlier_mult', type=float, default=3.0,
+                   help='fps only: drop candidates whose kNN distance exceeds '
+                        'this multiple of the median before selecting')
     p.add_argument('--power', type=float, default=2.0,
-                   help='weight = kNN_dist^power. 2 targets uniform area '
-                        'coverage; higher pushes harder into holes')
+                   help='weighted only: weight = kNN_dist^power')
     p.add_argument('--dedup_frac', type=float, default=0.3,
                    help='voxel dedup cell as a fraction of the median NN '
                         'spacing; 0 disables')
