@@ -22,7 +22,18 @@ All figures below are the 40-shape holdout unless noted.
 | `asdn-epoch039`, plain ASDN, single pass | 60.19 | 85.33 | **72.76** |
 | two-model ensemble + repulsion | 64.58 | 92.06 | 78.32 |
 | two REFINED models + repulsion | 65.09 | 92.69 | 78.89 |
-| **one refined model + repulsion** | **64.95** | **93.03** | **78.99** |
+| one refined model + repulsion | 64.95 | 93.03 | 78.99 |
+| joint backbone (`train_joint.py`), σ=1.1, repulsion 0.3/2 — no refine head | 64.92 | 93.25 | 79.09 |
+| **joint backbone, σ=1.1, repulsion 0.3/3** | **65.25** | **93.05** | **79.15** |
+
+The last two rows are the current best and the simplest stack in the table:
+the `train_joint.py` from-scratch cosine recipe (60 effective epochs), σ
+re-swept to 1.1, and the repulsion filter — no refinement head at all. Its
+jointly trained head adds nothing at the re-swept σ (it was rolled out at
+σ=1.5 during training), which turns out not to matter: the backbone's own
+gain covers the head's old contribution. The filter optimum moved with the
+backbone (0.3/2 → 0.3/3), worth +0.06 on the holdout and +0.13 on tune20 —
+one more instance of "a new backbone invalidates every downstream constant".
 
 A single refined model beats the two-model ensemble, so ensembling is dropped:
 same score, half the inference, one checkpoint. That follows from what the
@@ -83,6 +94,10 @@ Kept in the repo behind default-off flags so they are not retried blind:
 | straight-path steps (`--straight`) | best CD of the sweep (+0.21) but double the P2S cost (−0.36): clamping later steps to the step-1 direction also clamps the normal-direction corrections. Net −0.06, no reason to keep. |
 | weighted-mean stitching (`--stitch mean`) | −3.60 at α=1 (75.10 vs 78.70), CD *and* P2S both down. The ~6x patch overlap is not an independent ensemble: averaging positions across patches is a smoothing operation, and it fails for the same reason jet projection did — the output is already smoother than a local average of itself. CD dropping is the tell: averaging pulls points toward each other, worsening exactly the clumping it was meant to fix. Larger α cannot rescue it either — the weights are exp(−α·d), so α→∞ *is* the winner-take-all default, meaning mean stitching can only approach 78.70 from below. |
 | tangential-displacement penalty (`--tangent_weight`, E_disp of Xu et al. 2024) | CD −1.35 / P2S +1.11 at its own best σ, at both λ=1.0 and λ=0.3 — the trade is the *reverse* of the intent, and λ-insensitive (0.12 CD across a 3.3× weight change). Under isotropic noise ~2/3 of the error is tangential, so the "slide" this term forbids is mostly legitimate correction. Full autopsy in the distribution-terms section. |
+| CD loss on the refine head (`train_joint.py --head_cd_weight`) | dead heat with the plain head at matched σ (76.97 vs 76.97; CD +0.18 / P2S −0.19) even though the term's raw value fell throughout training — what it minimised was the sampling floor, not the recoverable part. Fourth and final distribution-in-the-loss failure. |
+| deep diffusion for the loud clouds (L=8/12, σ up to 1.3) | monotonically worse *in the high-noise bins themselves* (67.9 → 66.0 across the sweep): the loud clouds are not under-denoised, they are scrambled, and more steps add drift. Kills the "push harder" theory with per-bin evidence. |
+| ensembling σ-scale variants (1.0/1.1/1.2 of one checkpoint) | ±0.01 — the outputs are too correlated for averaging to cancel anything. The old two-checkpoint ensemble win does not transfer to same-checkpoint variants. |
+| density-weighted resampling of a candidate union (`resample_uniform.py --method weighted`) | −2.69: independent draws cannot enforce spacing, so neighbouring candidates win together (output p5 spacing collapsed 4×) and sparse-preference favours off-surface stragglers (P2S −1.5). The blue-noise variant (`--method fps`) exists for exactly these two failures; unmeasured as of this row. |
 
 Jet projection failing is informative: the model's output is already smoother
 than a local polynomial fit of itself, so any filter that only re-smooths the
@@ -218,9 +233,9 @@ Inference flags must match training: `--use_fusion`, `--static_depth`,
 | `--fusion_k` | 16 | paper uses 32 |
 | `--fusion_gate` | `pos` | `posfeat` matches the paper; changes parameter shapes |
 
-## Distribution terms in the loss: three attempts, measured
+## Distribution terms in the loss: four attempts, measured
 
-All three add a distribution signal the score loss cannot see. Compared bare
+All of these add a distribution signal the score loss cannot see. Compared bare
 (no refine head, fixed 0.3/2 filter) on 20 tune clouds, against the original
 λ=0 backbone measured identically — **CD 66.39 / P2S 89.94 / final 78.18**.
 
@@ -231,6 +246,16 @@ All three add a distribution signal the score loss cannot see. Compared bare
 | `--coverage_weight 10` | coverage 1.7e-4 → 1.0e-4, score loss below the λ=0 run | **CD 49.84 / P2S 76.62 / 63.23** at matched epoch 049 |
 | `--tangent_weight 1.0` | ‖n×s‖² 1.53e-4 → 8.88e-6 over 60 epochs | CD 65.04 (**−1.35**) / P2S 91.05 (**+1.11**) / 78.04 at σ=1.1 |
 | `--tangent_weight 0.3` | same term, 3.3× weaker | CD 64.90 / P2S 90.94 / 77.92 at σ=1.1 |
+| `--head_cd_weight 3e-4` (CD itself, on the refine head) | cd raw 0.0154 → 0.0144, 7.5% of head loss | dead heat with the plain head: 76.97 vs 76.97 at matched σ |
+
+The fourth attempt was the cleanest test the hypothesis will ever get: an
+actual CD loss, on a module with a neighbourhood receptive field, whose
+training path equals its inference path, at a weight that measurably moved the
+term — and the score did not move at all. What the term minimised was the
+sampling floor (two samplings of one surface are always ~a spacing apart), not
+the recoverable part. **The training route to CD is closed.** Redistribution
+has to happen to the point SET at inference, or not at all — see the ceiling
+section below.
 
 **Uniformity is rejected.** It does raise CD — the hypothesis that a
 distribution term in the loss improves CD is confirmed — but it pays 3.1 P2S
@@ -307,6 +332,42 @@ with clouds pinned at the schedule top. Scored at the old σ=1.5 it looks
 catastrophic (final 64.6) purely from over-denoising. This is the same trap as
 the epoch-059 comparison: **a new backbone is not comparable until its σ is
 recalibrated.**
+
+## The ceiling: how many CD points exist at all
+
+`measure_cd_floor.py` resamples each eval mesh with a fresh seed — a
+geometrically perfect answer that does not share the GT's sampling — and
+scores it. On tune20 (vs the joint backbone at σ=1.1, before the filter):
+
+| σ band | ceiling | achieved | headroom |
+|---|---|---|---|
+| 0.004–0.0105 | 54.0 | 50.7 | 3.3 |
+| 0.0105–0.0127 | 67.3 | 63.5 | 3.8 |
+| 0.0127–0.0176 | 76.7 | 67.9 | **8.8** |
+| 0.0176–0.0193 | 87.9 | 80.0 | **8.0** |
+| **mean** | **71.5** | 65.5 | 6.0 |
+
+Three consequences, each load-bearing:
+
+**A perfect independent-sampling answer scores ~85.7 total** (0.5·71.5 +
+0.5·~100). Any target above that requires exploiting the fact that the noisy
+cloud is the GT sampling plus noise — same rows, not an independent draw. Two
+clouds prove the model already does this a little (achieved ABOVE the
+resample ceiling: 17.6 vs 0.0, 52.5 vs 45.9, both thin/low-noise shapes where
+the NN target nearly equals the true origin). At σ ≳ 3× spacing the origins
+are fundamentally ambiguous — `--exact_score`'s −9.6 is what trying to learn
+them anyway costs.
+
+**The recoverable CD lives in the two loud bins** (~8–9 points each), and
+deep diffusion does NOT recover it (L=8/12 made those very bins worse). The
+loud clouds are on the surface but scrambled; the fix is redistribution of
+the set, worth at most ~+3.8 CD ≈ +1.9 total from here.
+
+**P2S headroom (~91.5 → ~95+, ≈ +1.7 total) is the same size as the entire
+CD redistribution prize** and projection error is the one residual that is
+demonstrably learnable. Budget accordingly: on this data distribution the
+honest reachable range is ~82–84, and the loud-bin work transfers directly to
+round B, whose higher noise shifts every ceiling upward.
 
 ## Why CD trails P2S, and where the fix belongs
 
